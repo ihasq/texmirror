@@ -5,8 +5,8 @@
   "type": "module",
   "license": "AGPL-3.0-or-later",
   "scripts": {
-    "dev": "node scripts/prepare-busytex-assets.mjs && vite --host 127.0.0.1",
-    "build": "node scripts/prepare-busytex-assets.mjs && tsc -b && vite build",
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "verify:e2e": "node scripts/verify-e2e.mjs",
     "update:pdfjs": "node scripts/update-pdfjs.mjs",
