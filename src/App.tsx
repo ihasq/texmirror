@@ -10,8 +10,9 @@ import {
 } from 'lucide-preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { EditorPane, type EditorPaneHandle, type EditorScrollSample } from './components/EditorPane';
-import { PdfPreview, type PdfPreviewHandle } from './components/PdfPreview';
+import { PdfPreview, type PdfPreviewHandle, type PdfScrollSyncSample } from './components/PdfPreview';
 import { DEFAULT_TEX } from './lib/examples';
+import { ScrollSyncDriver } from './lib/scrollSyncDriver';
 import {
   BrowserTexCompiler,
   type CompileRequest,
@@ -60,10 +61,10 @@ function App() {
   const compilerRef = useRef<BrowserTexCompiler | null>(null);
   const compilingRef = useRef(false);
   const queuedRef = useRef(false);
-  const scrollOwnerRef = useRef<ScrollOwner>('editor');
   const fileHandleRef = useRef<FileSystemFileHandle | null>(null);
   const editorPaneRef = useRef<EditorPaneHandle | null>(null);
   const pdfPreviewRef = useRef<PdfPreviewHandle | null>(null);
+  const scrollSyncDriverRef = useRef(new ScrollSyncDriver());
   const editorScrollSampleRef = useRef<EditorScrollSample>({ centerLine: 1, scrollTop: 0 });
   const sourceRef = useRef(source);
   const optionsRef = useRef({ engine, rerun });
@@ -84,6 +85,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem(AUTO_COMPILE_STORAGE_KEY, String(autoCompile));
   }, [autoCompile]);
+
+  useEffect(() => {
+    scrollSyncDriverRef.current.reset();
+  }, [syncIndex]);
 
   useEffect(() => {
     return () => {
@@ -227,25 +232,22 @@ function App() {
   }, [fileName]);
 
   const setScrollOwner = useCallback((owner: ScrollOwner) => {
-    scrollOwnerRef.current = owner;
+    scrollSyncDriverRef.current.setOwner(owner);
     setScrollOwnerState((current) => current === owner ? current : owner);
   }, []);
 
   const handleEditorScrollFrame = useCallback((sample: EditorScrollSample) => {
     editorScrollSampleRef.current = sample;
-    if (scrollOwnerRef.current !== 'editor') return;
-
-    pdfPreviewRef.current?.scrollToSourceLine(sample.centerLine, { force: true });
+    scrollSyncDriverRef.current.followEditor(sample, {
+      resolveSourceLineTarget: (line) => pdfPreviewRef.current?.resolveSourceLineTarget(line) ?? null,
+      scrollToSourceTarget: (target) => pdfPreviewRef.current?.scrollToSourceTarget(target)
+    });
   }, []);
 
-  const handlePdfSourceLineRequest = useCallback((line: number) => {
-    if (scrollOwnerRef.current !== 'preview') return;
-
-    editorPaneRef.current?.revealSourceLine(line, { force: true });
-  }, []);
-
-  const getCurrentEditorSourceLine = useCallback(() => {
-    return editorScrollSampleRef.current.centerLine;
+  const handlePdfScrollSyncSample = useCallback((sample: PdfScrollSyncSample) => {
+    scrollSyncDriverRef.current.followPreview(sample, {
+      revealSourceLine: (line) => editorPaneRef.current?.revealSourceLine(line)
+    });
   }, []);
 
   return (
@@ -341,11 +343,8 @@ function App() {
           ) : null}
           <PdfPreview
             data={pdfData}
-            getCurrentSourceLine={getCurrentEditorSourceLine}
             handleRef={pdfPreviewRef}
-            onSourceLineRequest={handlePdfSourceLineRequest}
-            reverseSyncEnabled={scrollOwner === 'preview'}
-            sourceSyncEnabled={scrollOwner === 'editor'}
+            onScrollSyncSample={handlePdfScrollSyncSample}
             syncIndex={syncIndex}
           />
         </section>
