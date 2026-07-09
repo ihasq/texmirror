@@ -14,6 +14,7 @@ const RAW_BUSYTEXT_DIR = path.join(RAW_ROOT, 'busytex');
 const LEGACY_PUBLIC_BUSYTEXT_DIR = path.join(ROOT, 'public', 'core', 'busytex');
 const PUBLIC_BUSYTEXT_DIR = LEGACY_PUBLIC_BUSYTEXT_DIR;
 const CHUNK_SIZE = 20 * 1024 * 1024;
+const DEPLOY_ASSET_VERSION = 2;
 
 const requiredRawFiles = [
   'busytex.js',
@@ -90,7 +91,7 @@ async function writeDeployAssets() {
   await fs.writeFile(path.join(tempDir, 'busytex_worker.js'), WORKER_SHIM);
 
   const manifest = {
-    version: 1,
+    version: DEPLOY_ASSET_VERSION,
     chunkSize: CHUNK_SIZE,
     assets: {}
   };
@@ -132,7 +133,7 @@ async function buildManifestDraft() {
       sourceMtimeMs: Math.trunc(stat.mtimeMs)
     };
   }
-  return { version: 1, chunkSize: CHUNK_SIZE, assets };
+  return { version: DEPLOY_ASSET_VERSION, chunkSize: CHUNK_SIZE, assets };
 }
 
 function isCurrentManifest(current, draft) {
@@ -263,6 +264,7 @@ const CHUNKED_ASSETS_HELPER = `(() => {
   const nativeFetch = self.fetch.bind(self);
   const chunkStore = idbKeyval.createStore('texmirror-busytex-assets-v1', 'chunks');
   const CACHE_KEY_PREFIX = 'busytex-gzip-chunk:';
+  const MAX_PARALLEL_CHUNK_LOADS = 6;
   let manifestPromise = null;
   let prunePromise = null;
 
@@ -353,13 +355,52 @@ const CHUNKED_ASSETS_HELPER = `(() => {
     return buffer;
   }
 
+  function limitParallel(maxConcurrency) {
+    const queue = [];
+    let active = 0;
+
+    return task => new Promise((resolve, reject) => {
+      const run = () => {
+        active += 1;
+        Promise.resolve()
+          .then(task)
+          .then(resolve, reject)
+          .finally(() => {
+            active -= 1;
+            const next = queue.shift();
+            if (next) next();
+          });
+      };
+
+      if (active < maxConcurrency) {
+        run();
+      } else {
+        queue.push(run);
+      }
+    });
+  }
+
+  function preloadCompressedChunks(assetName, asset, manifestUrl) {
+    const limit = limitParallel(MAX_PARALLEL_CHUNK_LOADS);
+    const chunkPromises = asset.chunks.map(chunk =>
+      limit(() => readCompressedChunk(assetName, asset, chunk, manifestUrl))
+    );
+
+    Promise.all(chunkPromises).catch(() => {
+      // The ordered stream loop below reports the actual error to PDF/TeX loading.
+    });
+
+    return chunkPromises;
+  }
+
   function makeCompressedChunkStream(assetName, asset, manifestUrl) {
     return new ReadableStream({
       async start(controller) {
         try {
           await prunePromise;
-          for (const chunk of asset.chunks) {
-            controller.enqueue(new Uint8Array(await readCompressedChunk(assetName, asset, chunk, manifestUrl)));
+          const chunkPromises = preloadCompressedChunks(assetName, asset, manifestUrl);
+          for (const chunkPromise of chunkPromises) {
+            controller.enqueue(new Uint8Array(await chunkPromise));
           }
           controller.close();
         } catch (error) {
