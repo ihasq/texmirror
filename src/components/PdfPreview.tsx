@@ -14,6 +14,7 @@ interface PdfPreviewProps {
 }
 
 export interface PdfScrollSyncSample {
+  scrollRange: number;
   scrollTop: number;
   sourceLine: number;
 }
@@ -21,6 +22,8 @@ export interface PdfScrollSyncSample {
 export interface PdfPreviewHandle {
   preserveScrollForNextDocument: () => void;
   resolveSourceLineTarget: (line: number) => PdfSourceTarget | null;
+  scrollToDisplacement: (displacement: number) => void;
+  scrollToScrollTop: (top: number) => void;
   scrollToSourceTarget: (target: PdfSourceTarget) => void;
 }
 
@@ -92,6 +95,8 @@ interface HandleRef<T> {
 
 const VIEWER_SRC = '/pdfjs/web/viewer.html#zoom=page-width&pagemode=none';
 const PDF_FILENAME = 'main.pdf';
+const PDF_FOCUS_X_RATIO = 0.36;
+const PDF_FOCUS_Y_RATIO = 0.46;
 const pdfFrameShellClassName = 'pdf-frame-shell relative min-h-0 bg-slate-200';
 const previewEmptyClassName =
   'preview-empty absolute inset-0 z-[2] grid min-h-full place-items-center content-center gap-2 bg-slate-200 p-6 text-center text-slate-500';
@@ -107,7 +112,6 @@ export function PdfPreview({
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const appRef = useRef<PdfViewerApplication | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
-  const lastRequestedSourceLineRef = useRef(0);
   const lastTargetKeyRef = useRef('');
   const onScrollSyncSampleRef = useRef(onScrollSyncSample);
   const preservedScrollSnapshotRef = useRef<PdfScrollSnapshot | null>(null);
@@ -123,7 +127,6 @@ export function PdfPreview({
   }, [onScrollSyncSample]);
 
   useEffect(() => {
-    lastRequestedSourceLineRef.current = 0;
     lastTargetKeyRef.current = '';
   }, [syncIndex]);
 
@@ -159,6 +162,20 @@ export function PdfPreview({
 
         return null;
       },
+      scrollToDisplacement(displacement: number) {
+        const app = appRef.current ?? getPdfViewerApplication(frameRef.current);
+        if (!app?.pdfViewer?.pagesCount) return;
+
+        appRef.current = app;
+        applyPdfScrollDisplacement(displacement, app, frameRef.current, lastTargetKeyRef);
+      },
+      scrollToScrollTop(top: number) {
+        const app = appRef.current ?? getPdfViewerApplication(frameRef.current);
+        if (!app?.pdfViewer?.pagesCount) return;
+
+        appRef.current = app;
+        applyPdfScrollTop(top, app, frameRef.current, lastTargetKeyRef);
+      },
       scrollToSourceTarget(target: PdfSourceTarget) {
         const app = appRef.current ?? getPdfViewerApplication(frameRef.current);
         if (!app?.pdfViewer?.pagesCount) return;
@@ -178,7 +195,6 @@ export function PdfPreview({
 
   useEffect(() => {
     appRef.current = null;
-    lastRequestedSourceLineRef.current = 0;
     lastTargetKeyRef.current = '';
     preservedScrollSnapshotRef.current = null;
     sourceSyncSuppressedRef.current = false;
@@ -273,28 +289,42 @@ export function PdfPreview({
       appRef.current = app;
       closeDocumentOutline(app);
 
-      const handleViewAreaUpdate: PdfEventListener = (event) => {
-        emitScrollSyncSample(app, event?.location);
+      const container = getViewerContainer(app, frameRef.current);
+      if (!container) return;
+
+      let lastScrollTop = Number.NaN;
+      let lastScrollLeft = Number.NaN;
+
+      const handleViewAreaUpdate: PdfEventListener = () => {
+        emitScrollSyncSample(app);
+      };
+      const handleContainerScroll = () => {
+        emitScrollSyncSample(app);
       };
       const handlePageChanging: PdfEventListener = () => {
-        const request = () => {
-          if (!disposed) {
-            emitScrollSyncSample(app, readCurrentPdfLocation(app, frameRef.current));
-          }
-        };
-
-        window.requestAnimationFrame(request);
-        timers.push(window.setTimeout(request, 80));
+        emitScrollSyncSample(app);
+        timers.push(window.setTimeout(() => emitScrollSyncSample(app), 80));
       };
-      const emitScrollSyncSample = (
-        app: PdfViewerApplication,
-        location: PdfViewAreaEvent['location'] | null | undefined
-      ) => {
+      const emitScrollSyncSample = (app: PdfViewerApplication) => {
         const index = syncIndexRef.current;
-        const container = getViewerContainer(app, frameRef.current);
+        const currentContainer = getViewerContainer(app, frameRef.current);
+        if (
+          !currentContainer ||
+          (
+            currentContainer.scrollTop === lastScrollTop &&
+            currentContainer.scrollLeft === lastScrollLeft
+          )
+        ) {
+          return;
+        }
+
+        lastScrollTop = currentContainer.scrollTop;
+        lastScrollLeft = currentContainer.scrollLeft;
+
+        const location = readCurrentPdfLocation(app, frameRef.current);
         const pageNumber = location?.pageNumber;
         const top = location?.top;
-        if (!index || !container || !pageNumber || typeof top !== 'number') return;
+        if (!index || !currentContainer || !pageNumber || typeof top !== 'number') return;
 
         const pageHeight = getPageHeight(app.pdfViewer?.getPageView(pageNumber - 1));
         const line = findSourceLineForPdfLocation(index, {
@@ -303,20 +333,23 @@ export function PdfPreview({
           left: location?.left,
           pageHeight
         });
-        const driverTop = container.scrollTop;
+        const driverTop = currentContainer.scrollTop;
         if (!line) return;
-        if (line === lastRequestedSourceLineRef.current) return;
 
-        lastRequestedSourceLineRef.current = line;
         onScrollSyncSampleRef.current?.({
+          scrollRange: getScrollRange(currentContainer),
           scrollTop: driverTop,
           sourceLine: line
         });
       };
 
+      container.addEventListener('scroll', handleContainerScroll, { passive: true });
       app.eventBus.on('updateviewarea', handleViewAreaUpdate);
       app.eventBus.on('pagechanging', handlePageChanging);
+      emitScrollSyncSample(app);
+
       cleanup = () => {
+        container.removeEventListener('scroll', handleContainerScroll);
         app.eventBus?.off('updateviewarea', handleViewAreaUpdate);
         app.eventBus?.off('pagechanging', handlePageChanging);
       };
@@ -401,6 +434,39 @@ function applyPdfScrollTarget(
   }
 }
 
+function applyPdfScrollDisplacement(
+  displacement: number,
+  app: PdfViewerApplication,
+  frame: HTMLIFrameElement | null,
+  lastTargetKeyRef: MutableRefObject<string>
+): void {
+  const container = getViewerContainer(app, frame);
+  if (!container) return;
+
+  const range = getScrollRange(container);
+  const top = clamp(displacement, 0, 1) * range;
+  if (Math.abs(container.scrollTop - top) < 0.5) return;
+
+  container.scrollTop = top;
+  lastTargetKeyRef.current = `displacement:${Math.round(top)}`;
+}
+
+function applyPdfScrollTop(
+  top: number,
+  app: PdfViewerApplication,
+  frame: HTMLIFrameElement | null,
+  lastTargetKeyRef: MutableRefObject<string>
+): void {
+  const container = getViewerContainer(app, frame);
+  if (!container) return;
+
+  const nextTop = clamp(top, 0, getScrollRange(container));
+  if (Math.abs(container.scrollTop - nextTop) < 0.5) return;
+
+  container.scrollTop = nextTop;
+  lastTargetKeyRef.current = `scroll:${Math.round(nextTop)}`;
+}
+
 async function waitForPdfViewer(
   frame: HTMLIFrameElement | null,
   options: { requirePages?: boolean } = {}
@@ -451,8 +517,12 @@ function readCurrentPdfLocation(
 ): PdfViewAreaEvent['location'] | null {
   const pdfViewer = app.pdfViewer;
   const container = getViewerContainer(app, frame);
-  const pageNumber = pdfViewer?.currentPageNumber;
-  if (!pdfViewer || !container || !pageNumber) return null;
+  if (!pdfViewer || !container || !pdfViewer.pagesCount) return null;
+
+  const focusTop = container.scrollTop + container.clientHeight * PDF_FOCUS_Y_RATIO;
+  const focusLeft = container.scrollLeft + container.clientWidth * PDF_FOCUS_X_RATIO;
+  const pageNumber = findPageNumberAtScrollTop(pdfViewer, container, focusTop);
+  if (!pageNumber) return null;
 
   const pageView = pdfViewer.getPageView(pageNumber - 1);
   const pageDiv = pageView?.div;
@@ -461,10 +531,39 @@ function readCurrentPdfLocation(
   const pageOffset = getOffsetWithin(pageDiv, container);
   const scale = pageView.viewport?.scale || 1;
   const pageHeight = getPageHeight(pageView);
-  const top = clamp((container.scrollTop - pageOffset.top) / scale, 0, pageHeight);
-  const left = Math.max(0, (container.scrollLeft - pageOffset.left) / scale);
+  const top = clamp((focusTop - pageOffset.top) / scale, 0, pageHeight);
+  const left = Math.max(0, (focusLeft - pageOffset.left) / scale);
 
   return { pageNumber, top, left };
+}
+
+function findPageNumberAtScrollTop(
+  pdfViewer: NonNullable<PdfViewerApplication['pdfViewer']>,
+  container: HTMLElement,
+  scrollTop: number
+): number | null {
+  let nearestPageNumber: number | null = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  for (let index = 0; index < pdfViewer.pagesCount; index += 1) {
+    const pageView = pdfViewer.getPageView(index);
+    const pageDiv = pageView?.div;
+    if (!pageDiv) continue;
+
+    const pageTop = getOffsetWithin(pageDiv, container).top;
+    const pageBottom = pageTop + pageDiv.offsetHeight;
+    if (scrollTop >= pageTop && scrollTop <= pageBottom) {
+      return index + 1;
+    }
+
+    const distance = scrollTop < pageTop ? pageTop - scrollTop : scrollTop - pageBottom;
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestPageNumber = index + 1;
+    }
+  }
+
+  return nearestPageNumber ?? pdfViewer.currentPageNumber ?? null;
 }
 
 function restoreScrollSnapshot(
@@ -479,6 +578,10 @@ function restoreScrollSnapshot(
   container.scrollTop = clamp(snapshot.top, 0, Math.max(0, container.scrollHeight - container.clientHeight));
   container.scrollLeft = clamp(snapshot.left, 0, Math.max(0, container.scrollWidth - container.clientWidth));
   lastTargetKeyRef.current = `preserved:${Math.round(container.scrollTop)}:${Math.round(container.scrollLeft)}`;
+}
+
+function getScrollRange(container: HTMLElement): number {
+  return Math.max(0, container.scrollHeight - container.clientHeight);
 }
 
 function closeDocumentOutline(app: PdfViewerApplication): void {

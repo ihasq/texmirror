@@ -25,11 +25,16 @@ interface EditorPaneProps {
 
 export interface EditorScrollSample {
   centerLine: number;
+  scrollRange: number;
   scrollTop: number;
 }
 
 export interface EditorPaneHandle {
   revealSourceLine: (line: number, options?: { force?: boolean }) => void;
+  resolveSourceLineScrollTop: (line: number) => number | null;
+  scrollToDisplacement: (displacement: number) => void;
+  scrollToScrollTop: (top: number) => void;
+  scrollToSourceLine: (line: number) => void;
 }
 
 interface HandleRef<T> {
@@ -60,6 +65,34 @@ export function EditorPane({ handleRef, value, onChange, onCompile, onScrollFram
             monaco.editor.ScrollType.Immediate
           );
         }
+      },
+      resolveSourceLineScrollTop(line: number) {
+        const editor = editorRef.current;
+        if (!editor || line < 1) return null;
+
+        return resolveSourceLineScrollTop(editor, line);
+      },
+      scrollToDisplacement(displacement: number) {
+        const editor = editorRef.current;
+        if (!editor) return;
+
+        const target = clamp(displacement, 0, 1) * getEditorScrollRange(editor);
+        editor.setScrollTop(target, monaco.editor.ScrollType.Immediate);
+      },
+      scrollToScrollTop(top: number) {
+        const editor = editorRef.current;
+        if (!editor) return;
+
+        editor.setScrollTop(clamp(top, 0, getEditorScrollRange(editor)), monaco.editor.ScrollType.Immediate);
+      },
+      scrollToSourceLine(line: number) {
+        const editor = editorRef.current;
+        if (!editor || line < 1) return;
+
+        const target = resolveSourceLineScrollTop(editor, line);
+        if (target === null) return;
+
+        editor.setScrollTop(target, monaco.editor.ScrollType.Immediate);
       }
     };
 
@@ -111,41 +144,23 @@ export function EditorPane({ handleRef, value, onChange, onCompile, onScrollFram
       void editor.getAction('editor.action.startFindReplaceAction')?.run();
     });
 
-    let scrollFrame = 0;
-    let stableFrames = 0;
     let lastScrollTop = Number.NaN;
     let lastCenterLine = 0;
-    const sampleScrollFrame = () => {
-      scrollFrame = 0;
+    const emitScrollSample = () => {
       const visibleRange = editor.getVisibleRanges()[0];
-      if (!visibleRange) {
-        stableFrames += 1;
-        return;
-      }
+      if (!visibleRange) return;
 
       const centerLine = Math.round(
         (visibleRange.startLineNumber + visibleRange.endLineNumber) / 2
       );
       const scrollTop = editor.getScrollTop();
+      const scrollRange = getEditorScrollRange(editor);
       const changed = scrollTop !== lastScrollTop || centerLine !== lastCenterLine;
 
       if (changed) {
         lastScrollTop = scrollTop;
         lastCenterLine = centerLine;
-        stableFrames = 0;
-        onScrollFrame?.({ centerLine, scrollTop });
-      } else {
-        stableFrames += 1;
-      }
-
-      if (stableFrames < 3) {
-        scrollFrame = window.requestAnimationFrame(sampleScrollFrame);
-      }
-    };
-    const trackScrollFrames = () => {
-      stableFrames = 0;
-      if (!scrollFrame) {
-        scrollFrame = window.requestAnimationFrame(sampleScrollFrame);
+        onScrollFrame?.({ centerLine, scrollRange, scrollTop });
       }
     };
 
@@ -156,15 +171,14 @@ export function EditorPane({ handleRef, value, onChange, onCompile, onScrollFram
     });
     const scrollSubscription = editor.onDidScrollChange((event) => {
       if (event.scrollTopChanged) {
-        trackScrollFrames();
+        emitScrollSample();
       }
     });
 
     editorRef.current = editor;
-    trackScrollFrames();
+    emitScrollSample();
 
     return () => {
-      if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
       scrollSubscription.dispose();
       changeSubscription.dispose();
       editor.dispose();
@@ -173,4 +187,36 @@ export function EditorPane({ handleRef, value, onChange, onCompile, onScrollFram
   }, [onChange, onCompile, onScrollFrame]);
 
   return <div className={editorHostClassName} ref={hostRef} />;
+}
+
+function resolveSourceLineScrollTop(
+  editor: monaco.editor.IStandaloneCodeEditor,
+  sourceLine: number
+): number | null {
+  const model = editor.getModel();
+  if (!model) return null;
+
+  const lineCount = model.getLineCount();
+  const clampedLine = Math.min(Math.max(1, sourceLine), lineCount);
+  const lineNumber = Math.floor(clampedLine);
+  const nextLineNumber = Math.min(lineNumber + 1, lineCount);
+  const lineTop = editor.getTopForLineNumber(lineNumber);
+  const nextLineTop = nextLineNumber === lineNumber
+    ? lineTop + editor.getOption(monaco.editor.EditorOption.lineHeight)
+    : editor.getTopForLineNumber(nextLineNumber);
+  const lineFraction = clampedLine - lineNumber;
+  const interpolatedLineTop = lineTop + (nextLineTop - lineTop) * lineFraction;
+  const layoutHeight = editor.getLayoutInfo().height;
+  const maxScrollTop = getEditorScrollRange(editor);
+  const target = interpolatedLineTop - layoutHeight * 0.46;
+
+  return Math.min(Math.max(target, 0), maxScrollTop);
+}
+
+function getEditorScrollRange(editor: monaco.editor.IStandaloneCodeEditor): number {
+  return Math.max(0, editor.getScrollHeight() - editor.getLayoutInfo().height);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }

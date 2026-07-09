@@ -2,10 +2,12 @@ export type ScrollSyncOwner = 'editor' | 'preview';
 
 export interface EditorScrollDriverSample {
   centerLine: number;
+  scrollRange: number;
   scrollTop: number;
 }
 
 export interface PreviewScrollDriverSample {
+  scrollRange: number;
   scrollTop: number;
   sourceLine: number;
 }
@@ -14,51 +16,51 @@ export interface ScrollFollowerTarget {
   top: number;
 }
 
+export interface ScrollSyncCheckpoint {
+  editorTop: number;
+  previewTop: number;
+  sourceLine: number;
+}
+
+export interface ScrollSyncCheckpointPair {
+  lower: ScrollSyncCheckpoint;
+  upper: ScrollSyncCheckpoint;
+}
+
 interface PreviewFollower<Target extends ScrollFollowerTarget> {
+  resolveScrollCheckpoints: (ownerTop: number, owner: ScrollSyncOwner) => ScrollSyncCheckpointPair | null;
   resolveSourceLineTarget: (line: number) => Target | null;
+  scrollToDisplacement: (displacement: number) => void;
+  scrollToScrollTop: (top: number) => void;
   scrollToSourceTarget: (target: Target) => void;
 }
 
 interface EditorFollower {
-  revealSourceLine: (line: number) => void;
+  resolveScrollCheckpoints: (ownerTop: number, owner: ScrollSyncOwner) => ScrollSyncCheckpointPair | null;
+  scrollToDisplacement: (displacement: number) => void;
+  scrollToScrollTop: (top: number) => void;
+  scrollToSourceLine: (line: number) => void;
 }
 
-interface DirectionalCheckpointOptions {
-  driverGap: number;
-  driverTolerance: number;
-  passFirst: boolean;
-  targetGap: number;
-  targetTolerance: number;
+interface ScrollDisplacementUpdate {
+  displacement: number;
 }
 
-interface DirectionalCheckpointState {
-  direction: ScrollDirection;
-  driver: number;
-  target: number;
+interface ScrollDisplacementState {
+  displacement: number;
+  scrollRange: number;
+  scrollTop: number;
 }
 
-type ScrollDirection = 'forward' | 'backward' | 'none';
+const SCROLL_TOP_TOLERANCE = 0.5;
+const DISPLACEMENT_TOLERANCE = 0.000001;
 
 export class ScrollSyncDriver {
   private owner: ScrollSyncOwner = 'editor';
-  private readonly editorToPreview = new DirectionalCheckpoint({
-    driverGap: 1,
-    driverTolerance: 1,
-    passFirst: false,
-    targetGap: 18,
-    targetTolerance: 4
-  });
-  private readonly previewToEditor = new DirectionalCheckpoint({
-    driverGap: 8,
-    driverTolerance: 1,
-    passFirst: true,
-    targetGap: 1,
-    targetTolerance: 0
-  });
+  private readonly displacement = new UnifiedScrollDisplacement();
 
   reset(): void {
-    this.editorToPreview.reset();
-    this.previewToEditor.reset();
+    this.displacement.reset();
   }
 
   setOwner(owner: ScrollSyncOwner): void {
@@ -74,73 +76,114 @@ export class ScrollSyncDriver {
   ): void {
     if (this.owner !== 'editor') return;
 
+    const update = this.displacement.update(sample);
+    if (!update) return;
+
+    const checkpointTop = resolveCheckpointMappedTop(
+      sample.scrollTop,
+      'editor',
+      follower.resolveScrollCheckpoints(sample.scrollTop, 'editor')
+    );
+    if (checkpointTop !== null) {
+      follower.scrollToScrollTop(checkpointTop);
+      return;
+    }
+
+    if (sample.scrollRange > 0) {
+      follower.scrollToDisplacement(update.displacement);
+      return;
+    }
+
     const target = follower.resolveSourceLineTarget(sample.centerLine);
     if (!target) return;
 
-    if (this.editorToPreview.shouldPass(sample.scrollTop, target.top)) {
-      follower.scrollToSourceTarget(target);
-    }
+    follower.scrollToSourceTarget(target);
   }
 
   followPreview(sample: PreviewScrollDriverSample, follower: EditorFollower): void {
     if (this.owner !== 'preview') return;
 
-    if (this.previewToEditor.shouldPass(sample.scrollTop, sample.sourceLine)) {
-      follower.revealSourceLine(sample.sourceLine);
+    const update = this.displacement.update(sample);
+    if (!update) return;
+
+    const checkpointTop = resolveCheckpointMappedTop(
+      sample.scrollTop,
+      'preview',
+      follower.resolveScrollCheckpoints(sample.scrollTop, 'preview')
+    );
+    if (checkpointTop !== null) {
+      follower.scrollToScrollTop(checkpointTop);
+      return;
+    }
+
+    if (sample.scrollRange > 0) {
+      follower.scrollToDisplacement(update.displacement);
+    } else {
+      follower.scrollToSourceLine(sample.sourceLine);
     }
   }
 }
 
-class DirectionalCheckpoint {
-  private checkpoint: DirectionalCheckpointState | null = null;
-
-  constructor(private readonly options: DirectionalCheckpointOptions) {}
+class UnifiedScrollDisplacement {
+  private state: ScrollDisplacementState | null = null;
 
   reset(): void {
-    this.checkpoint = null;
+    this.state = null;
   }
 
-  shouldPass(driver: number, target: number): boolean {
-    const checkpoint = this.checkpoint;
-    if (!checkpoint) {
-      this.checkpoint = { direction: 'none', driver, target };
-      return this.options.passFirst;
+  update(sample: { scrollRange: number; scrollTop: number }): ScrollDisplacementUpdate | null {
+    const scrollRange = Math.max(0, sample.scrollRange);
+    const scrollTop = clamp(sample.scrollTop, 0, scrollRange);
+    const displacement = scrollRange > 0 ? scrollTop / scrollRange : 0;
+    const previous = this.state;
+
+    this.state = { displacement, scrollRange, scrollTop };
+
+    if (!previous) {
+      return { displacement };
     }
 
-    const direction = getDirection(driver - checkpoint.driver, this.options.driverTolerance);
-    if (direction === 'none') return false;
-
-    if (checkpoint.direction !== 'none' && direction !== checkpoint.direction) {
-      this.checkpoint = { direction, driver, target };
-      return true;
+    const scrollTopChanged = Math.abs(scrollTop - previous.scrollTop) > SCROLL_TOP_TOLERANCE;
+    const displacementChanged = Math.abs(displacement - previous.displacement) > DISPLACEMENT_TOLERANCE;
+    const rangeChanged = scrollRange !== previous.scrollRange;
+    if (!scrollTopChanged && !displacementChanged && !rangeChanged) {
+      return null;
     }
 
-    const targetDelta = target - checkpoint.target;
-    if (movesAgainstDirection(targetDelta, direction, this.options.targetTolerance)) {
-      return false;
-    }
-
-    const driverDelta = Math.abs(driver - checkpoint.driver);
-    const targetDistance = Math.abs(targetDelta);
-    if (driverDelta < this.options.driverGap || targetDistance < this.options.targetGap) {
-      return false;
-    }
-
-    this.checkpoint = { direction, driver, target };
-    return true;
+    return { displacement };
   }
 }
 
-function getDirection(delta: number, tolerance: number): ScrollDirection {
-  if (Math.abs(delta) <= tolerance) return 'none';
-
-  return delta > 0 ? 'forward' : 'backward';
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }
 
-function movesAgainstDirection(
-  delta: number,
-  direction: Exclude<ScrollDirection, 'none'>,
-  tolerance: number
-): boolean {
-  return direction === 'forward' ? delta < -tolerance : delta > tolerance;
+function resolveCheckpointMappedTop(
+  ownerTop: number,
+  owner: ScrollSyncOwner,
+  checkpoints: ScrollSyncCheckpointPair | null
+): number | null {
+  if (!checkpoints) return null;
+
+  const fromLower = owner === 'editor' ? checkpoints.lower.editorTop : checkpoints.lower.previewTop;
+  const fromUpper = owner === 'editor' ? checkpoints.upper.editorTop : checkpoints.upper.previewTop;
+  const toLower = owner === 'editor' ? checkpoints.lower.previewTop : checkpoints.lower.editorTop;
+  const toUpper = owner === 'editor' ? checkpoints.upper.previewTop : checkpoints.upper.editorTop;
+
+  if (
+    !Number.isFinite(fromLower) ||
+    !Number.isFinite(fromUpper) ||
+    !Number.isFinite(toLower) ||
+    !Number.isFinite(toUpper)
+  ) {
+    return null;
+  }
+
+  const fromSpan = fromUpper - fromLower;
+  if (Math.abs(fromSpan) < 0.5) {
+    return toLower;
+  }
+
+  const ratio = clamp((ownerTop - fromLower) / fromSpan, 0, 1);
+  return toLower + (toUpper - toLower) * ratio;
 }

@@ -22,6 +22,10 @@ const SP_PER_TEX_POINT = 65536;
 const PDF_POINTS_PER_TEX_POINT = 72 / 72.27;
 const DEFAULT_MAGNIFICATION = 1000;
 const RECORD_RE = /^[([a-zA-Z$]*(-?\d+),(-?\d+)(?::\d+)?:(-?\d+),(-?\d+)/;
+const lineAnchorCache = new WeakMap<
+  SyncTexPosition[],
+  { pageHeight: number; anchors: Array<{ line: number; top: number }> }
+>();
 
 export async function parseSyncTexIndex(data: Uint8Array): Promise<SyncTexIndex | null> {
   const text = await inflateGzipText(data);
@@ -127,22 +131,27 @@ export function findSourceLineForPdfLocation(
   const positions = index.positionsByPage.get(location.page);
   if (!positions?.length) return null;
 
-  let bestPosition: SyncTexPosition | null = null;
-  let bestScore = Number.POSITIVE_INFINITY;
+  const anchors = getInterpolatedLineAnchors(positions, location.pageHeight);
+  if (anchors.length === 0) return null;
 
-  for (const position of positions) {
-    const top = location.pageHeight - position.y;
-    const yDistance = Math.abs(top - location.top);
-    const xDistance = location.left === undefined ? 0 : Math.abs(position.x - location.left);
-    const score = yDistance + xDistance * 0.12;
+  const top = Math.min(Math.max(location.top, 0), location.pageHeight);
+  if (top <= anchors[0].top) return anchors[0].line;
 
-    if (score < bestScore) {
-      bestScore = score;
-      bestPosition = position;
-    }
+  const lastAnchor = anchors[anchors.length - 1];
+  if (top >= lastAnchor.top) return lastAnchor.line;
+
+  const nextIndex = lowerBoundAnchorTop(anchors, top);
+  const previous = anchors[nextIndex - 1];
+  const next = anchors[nextIndex];
+  if (!previous || !next) return (previous ?? next)?.line ?? null;
+
+  const topDelta = next.top - previous.top;
+  const lineDelta = next.line - previous.line;
+  if (topDelta <= 0.5 || Math.abs(lineDelta) <= 0.001) {
+    return previous.line;
   }
 
-  return bestPosition?.line ?? null;
+  return previous.line + lineDelta * ((top - previous.top) / topDelta);
 }
 
 async function inflateGzipText(data: Uint8Array): Promise<string> {
@@ -191,8 +200,88 @@ function lowerBound(values: number[], target: number): number {
   return low;
 }
 
+function lowerBoundAnchorTop(anchors: Array<{ line: number; top: number }>, target: number): number {
+  let low = 0;
+  let high = anchors.length;
+
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (anchors[mid].top < target) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  return low;
+}
+
 function comparePositions(lhs: SyncTexPosition, rhs: SyncTexPosition): number {
   return lhs.page - rhs.page || lhs.y - rhs.y || lhs.x - rhs.x;
+}
+
+function getInterpolatedLineAnchors(
+  positions: SyncTexPosition[],
+  pageHeight: number
+): Array<{ line: number; top: number }> {
+  const cached = lineAnchorCache.get(positions);
+  if (cached && cached.pageHeight === pageHeight) {
+    return cached.anchors;
+  }
+
+  const anchors = buildInterpolatedLineAnchors(positions, pageHeight);
+  lineAnchorCache.set(positions, { pageHeight, anchors });
+  return anchors;
+}
+
+function buildInterpolatedLineAnchors(
+  positions: SyncTexPosition[],
+  pageHeight: number
+): Array<{ line: number; top: number }> {
+  const topsByLine = new Map<number, number[]>();
+
+  for (const position of positions) {
+    const top = pageHeight - position.y;
+    if (!Number.isFinite(top)) continue;
+
+    const tops = topsByLine.get(position.line) ?? [];
+    tops.push(top);
+    topsByLine.set(position.line, tops);
+  }
+
+  const rawAnchors = [...topsByLine.entries()]
+    .map(([line, tops]) => ({
+      line,
+      top: median(tops)
+    }))
+    .filter((anchor) => Number.isFinite(anchor.top))
+    .sort((lhs, rhs) => lhs.top - rhs.top || lhs.line - rhs.line);
+
+  const anchors: Array<{ line: number; top: number }> = [];
+  let lastLine = -Infinity;
+
+  for (const anchor of rawAnchors) {
+    if (anchor.line < lastLine) continue;
+
+    const previous = anchors[anchors.length - 1];
+    if (previous && Math.abs(previous.top - anchor.top) < 0.5) {
+      if (anchor.line > previous.line) {
+        previous.line = anchor.line;
+      }
+      lastLine = Math.max(lastLine, previous.line);
+      continue;
+    }
+
+    anchors.push(anchor);
+    lastLine = anchor.line;
+  }
+
+  return anchors;
+}
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((lhs, rhs) => lhs - rhs);
+  return sorted[Math.floor(sorted.length / 2)] ?? Number.NaN;
 }
 
 function buildPositionsByPage(

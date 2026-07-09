@@ -12,7 +12,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { EditorPane, type EditorPaneHandle, type EditorScrollSample } from './components/EditorPane';
 import { PdfPreview, type PdfPreviewHandle, type PdfScrollSyncSample } from './components/PdfPreview';
 import { DEFAULT_TEX } from './lib/examples';
-import { ScrollSyncDriver } from './lib/scrollSyncDriver';
+import {
+  ScrollSyncDriver,
+  type ScrollSyncCheckpoint,
+  type ScrollSyncCheckpointPair
+} from './lib/scrollSyncDriver';
 import {
   BrowserTexCompiler,
   type CompileRequest,
@@ -30,6 +34,8 @@ const RERUN_STORAGE_KEY = 'texmirror.rerun';
 const AUTO_COMPILE_STORAGE_KEY = 'texmirror.autoCompile';
 const DEBOUNCE_MS = 900;
 const DEFAULT_SAVE_NAME = 'document.tex';
+const STRUCTURAL_CHECKPOINT_COMMAND_RE =
+  /\\(?:part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?(?:\s*\[[^\]]*])?\s*\{|\\begin\s*\{/;
 const TEX_FILE_TYPES: FilePickerAcceptType[] = [
   {
     description: 'TeX source',
@@ -103,11 +109,15 @@ function App() {
   const editorPaneRef = useRef<EditorPaneHandle | null>(null);
   const pdfPreviewRef = useRef<PdfPreviewHandle | null>(null);
   const scrollSyncDriverRef = useRef(new ScrollSyncDriver());
-  const editorScrollSampleRef = useRef<EditorScrollSample>({ centerLine: 1, scrollTop: 0 });
+  const editorScrollSampleRef = useRef<EditorScrollSample>({ centerLine: 1, scrollRange: 0, scrollTop: 0 });
   const sourceRef = useRef(source);
   const optionsRef = useRef({ engine, rerun });
   const canUseFileSystem = typeof window.showOpenFilePicker === 'function' &&
     typeof window.showSaveFilePicker === 'function';
+  const structuralCheckpointLines = useMemo(
+    () => resolveStructuralCheckpointLines(source, syncIndex),
+    [source, syncIndex]
+  );
 
   useEffect(() => {
     sourceRef.current = source;
@@ -281,16 +291,22 @@ function App() {
   const handleEditorScrollFrame = useCallback((sample: EditorScrollSample) => {
     editorScrollSampleRef.current = sample;
     scrollSyncDriverRef.current.followEditor(sample, {
+      resolveScrollCheckpoints: (ownerTop, owner) => resolveScrollSyncCheckpoints(ownerTop, owner, structuralCheckpointLines, editorPaneRef.current, pdfPreviewRef.current),
       resolveSourceLineTarget: (line) => pdfPreviewRef.current?.resolveSourceLineTarget(line) ?? null,
+      scrollToDisplacement: (displacement) => pdfPreviewRef.current?.scrollToDisplacement(displacement),
+      scrollToScrollTop: (top) => pdfPreviewRef.current?.scrollToScrollTop(top),
       scrollToSourceTarget: (target) => pdfPreviewRef.current?.scrollToSourceTarget(target)
     });
-  }, []);
+  }, [structuralCheckpointLines]);
 
   const handlePdfScrollSyncSample = useCallback((sample: PdfScrollSyncSample) => {
     scrollSyncDriverRef.current.followPreview(sample, {
-      revealSourceLine: (line) => editorPaneRef.current?.revealSourceLine(line)
+      resolveScrollCheckpoints: (ownerTop, owner) => resolveScrollSyncCheckpoints(ownerTop, owner, structuralCheckpointLines, editorPaneRef.current, pdfPreviewRef.current),
+      scrollToDisplacement: (displacement) => editorPaneRef.current?.scrollToDisplacement(displacement),
+      scrollToScrollTop: (top) => editorPaneRef.current?.scrollToScrollTop(top),
+      scrollToSourceLine: (line) => editorPaneRef.current?.scrollToSourceLine(line)
     });
-  }, []);
+  }, [structuralCheckpointLines]);
 
   return (
     <div className={appShellClassName}>
@@ -440,6 +456,118 @@ function getStatusPillClassName(state: CompileState, compact = false): string {
 function getLogPanelClassName(showLog: boolean): string {
   const state = showLog ? 'open grid grid-rows-[auto_minmax(72px,150px)]' : 'closed';
   return `log-panel ${state} border-t border-slate-300 bg-white`;
+}
+
+function resolveScrollSyncCheckpoints(
+  ownerTop: number,
+  owner: ScrollOwner,
+  checkpointLines: number[],
+  editor: EditorPaneHandle | null,
+  preview: PdfPreviewHandle | null
+): ScrollSyncCheckpointPair | null {
+  if (checkpointLines.length < 2 || !editor || !preview) return null;
+
+  const checkpoints = checkpointLines
+    .map((line) => resolveScrollSyncCheckpoint(line, editor, preview))
+    .filter((checkpoint): checkpoint is ScrollSyncCheckpoint => checkpoint !== null)
+    .sort((left, right) => getCheckpointTop(left, owner) - getCheckpointTop(right, owner));
+  if (checkpoints.length < 2) return null;
+
+  const upperInsertion = lowerBoundBy(checkpoints, ownerTop, (checkpoint) => getCheckpointTop(checkpoint, owner));
+  let lowerIndex: number;
+  let upperIndex: number;
+
+  if (upperInsertion <= 0) {
+    lowerIndex = 0;
+    upperIndex = 1;
+  } else if (upperInsertion >= checkpoints.length) {
+    lowerIndex = checkpoints.length - 2;
+    upperIndex = checkpoints.length - 1;
+  } else {
+    lowerIndex = upperInsertion - 1;
+    upperIndex = upperInsertion;
+  }
+
+  return {
+    lower: checkpoints[lowerIndex],
+    upper: checkpoints[upperIndex]
+  };
+}
+
+function resolveStructuralCheckpointLines(source: string, syncIndex: SyncTexIndex | null): number[] {
+  if (!syncIndex?.lines.length) return [];
+
+  const maxSyncedLine = syncIndex.lines[syncIndex.lines.length - 1];
+  const lines: number[] = [];
+  const seen = new Set<number>();
+  const sourceLines = source.split(/\r?\n/);
+
+  for (let index = 0; index < sourceLines.length; index += 1) {
+    const lineNumber = index + 1;
+    if (lineNumber > maxSyncedLine) break;
+
+    const line = stripTexComment(sourceLines[index]);
+    if (!STRUCTURAL_CHECKPOINT_COMMAND_RE.test(line)) continue;
+    if (seen.has(lineNumber)) continue;
+
+    seen.add(lineNumber);
+    lines.push(lineNumber);
+  }
+
+  return lines;
+}
+
+function stripTexComment(line: string): string {
+  for (let index = 0; index < line.length; index += 1) {
+    if (line[index] !== '%') continue;
+
+    let slashCount = 0;
+    for (let cursor = index - 1; cursor >= 0 && line[cursor] === '\\'; cursor -= 1) {
+      slashCount += 1;
+    }
+
+    if (slashCount % 2 === 0) {
+      return line.slice(0, index);
+    }
+  }
+
+  return line;
+}
+
+function resolveScrollSyncCheckpoint(
+  sourceLine: number,
+  editor: EditorPaneHandle,
+  preview: PdfPreviewHandle
+): ScrollSyncCheckpoint | null {
+  const editorTop = editor.resolveSourceLineScrollTop(sourceLine);
+  const previewTarget = preview.resolveSourceLineTarget(sourceLine);
+  if (editorTop === null || !previewTarget) return null;
+
+  return {
+    editorTop,
+    previewTop: previewTarget.top,
+    sourceLine
+  };
+}
+
+function getCheckpointTop(checkpoint: ScrollSyncCheckpoint, owner: ScrollOwner): number {
+  return owner === 'editor' ? checkpoint.editorTop : checkpoint.previewTop;
+}
+
+function lowerBoundBy<T>(values: T[], target: number, getValue: (value: T) => number): number {
+  let low = 0;
+  let high = values.length;
+
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (getValue(values[mid]) < target) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  return low;
 }
 
 function formatCompileLog(log: string, exitCode: number, elapsedSeconds: string): string {
