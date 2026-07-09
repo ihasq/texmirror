@@ -34,7 +34,7 @@ try {
       const hasMainTexLabel = document.body.textContent?.includes('main.tex');
       return Boolean(
         status &&
-          frameSrc.includes('/pdfjs/web/viewer.html?file=') &&
+          frameSrc.includes('/pdfjs/web/viewer.html') &&
           !pdfHeader &&
           fileButtons.length === 2 &&
           logClosed &&

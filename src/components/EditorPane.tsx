@@ -29,7 +29,7 @@ export interface EditorScrollSample {
 }
 
 export interface EditorPaneHandle {
-  revealSourceLine: (line: number) => void;
+  revealSourceLine: (line: number, options?: { force?: boolean }) => void;
 }
 
 interface HandleRef<T> {
@@ -45,15 +45,19 @@ export function EditorPane({ handleRef, value, onChange, onCompile, onScrollFram
     if (!handleRef) return;
 
     const handle: EditorPaneHandle = {
-      revealSourceLine(line: number) {
+      revealSourceLine(line: number, options?: { force?: boolean }) {
         const editor = editorRef.current;
         if (!editor || line < 1) return;
 
         const lineNumber = Math.min(Math.max(1, Math.round(line)), editor.getModel()?.getLineCount() ?? line);
-        editor.revealLineInCenterIfOutsideViewport(
-          lineNumber,
-          monaco.editor.ScrollType.Immediate
-        );
+        if (options?.force) {
+          editor.revealLineInCenter(lineNumber, monaco.editor.ScrollType.Immediate);
+        } else {
+          editor.revealLineInCenterIfOutsideViewport(
+            lineNumber,
+            monaco.editor.ScrollType.Immediate
+          );
+        }
       }
     };
 

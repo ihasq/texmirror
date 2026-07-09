@@ -142,11 +142,19 @@ button {
 }
 
 .pane {
+  position: relative;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   background: #ffffff;
+}
+
+.sync-gate-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  background: transparent;
 }
 
 .editor-pane {

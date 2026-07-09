@@ -21,7 +21,7 @@ import {
 import { parseSyncTexIndex, type SyncTexIndex } from './lib/synctex';
 
 type CompileState = 'idle' | 'initializing' | 'compiling' | 'success' | 'error';
-type ActivePane = 'editor' | 'preview';
+type ScrollOwner = 'editor' | 'preview';
 
 const STORAGE_KEY = 'texmirror.source';
 const ENGINE_STORAGE_KEY = 'texmirror.engine';
@@ -55,12 +55,12 @@ function App() {
   const [showLog, setShowLog] = useState(false);
   const [fileName, setFileName] = useState<string | null>(null);
   const [syncIndex, setSyncIndex] = useState<SyncTexIndex | null>(null);
-  const [activePane, setActivePaneState] = useState<ActivePane>('editor');
+  const [scrollOwner, setScrollOwnerState] = useState<ScrollOwner>('editor');
 
   const compilerRef = useRef<BrowserTexCompiler | null>(null);
   const compilingRef = useRef(false);
   const queuedRef = useRef(false);
-  const activePaneRef = useRef<ActivePane>('editor');
+  const scrollOwnerRef = useRef<ScrollOwner>('editor');
   const fileHandleRef = useRef<FileSystemFileHandle | null>(null);
   const editorPaneRef = useRef<EditorPaneHandle | null>(null);
   const pdfPreviewRef = useRef<PdfPreviewHandle | null>(null);
@@ -84,26 +84,6 @@ function App() {
   useEffect(() => {
     localStorage.setItem(AUTO_COMPILE_STORAGE_KEY, String(autoCompile));
   }, [autoCompile]);
-
-  useEffect(() => {
-    if (!syncIndex) return;
-
-    let frame = 0;
-    const timers: number[] = [];
-    const scrollToCurrentEditorLine = () => {
-      pdfPreviewRef.current?.scrollToSourceLine(editorScrollSampleRef.current.centerLine);
-    };
-
-    scrollToCurrentEditorLine();
-    frame = window.requestAnimationFrame(scrollToCurrentEditorLine);
-    timers.push(window.setTimeout(scrollToCurrentEditorLine, 180));
-    timers.push(window.setTimeout(scrollToCurrentEditorLine, 500));
-
-    return () => {
-      if (frame) window.cancelAnimationFrame(frame);
-      for (const timer of timers) window.clearTimeout(timer);
-    };
-  }, [syncIndex]);
 
   useEffect(() => {
     return () => {
@@ -132,6 +112,7 @@ function App() {
       const startedAt = performance.now();
       const firstCompile = !compilerRef.current;
 
+      pdfPreviewRef.current?.preserveScrollForNextDocument();
       setState(firstCompile ? 'initializing' : 'compiling');
       setAssetProgress(firstCompile ? 0 : null);
       setSyncIndex(null);
@@ -245,22 +226,22 @@ function App() {
     }
   }, [fileName]);
 
-  const setActivePane = useCallback((pane: ActivePane) => {
-    activePaneRef.current = pane;
-    setActivePaneState((current) => current === pane ? current : pane);
+  const setScrollOwner = useCallback((owner: ScrollOwner) => {
+    scrollOwnerRef.current = owner;
+    setScrollOwnerState((current) => current === owner ? current : owner);
   }, []);
 
   const handleEditorScrollFrame = useCallback((sample: EditorScrollSample) => {
     editorScrollSampleRef.current = sample;
-    if (activePaneRef.current !== 'editor') return;
+    if (scrollOwnerRef.current !== 'editor') return;
 
-    pdfPreviewRef.current?.scrollToSourceLine(sample.centerLine);
+    pdfPreviewRef.current?.scrollToSourceLine(sample.centerLine, { force: true });
   }, []);
 
   const handlePdfSourceLineRequest = useCallback((line: number) => {
-    if (activePaneRef.current !== 'preview') return;
+    if (scrollOwnerRef.current !== 'preview') return;
 
-    editorPaneRef.current?.revealSourceLine(line);
+    editorPaneRef.current?.revealSourceLine(line, { force: true });
   }, []);
 
   const getCurrentEditorSourceLine = useCallback(() => {
@@ -273,10 +254,10 @@ function App() {
         <section
           className="pane editor-pane"
           aria-label="LaTeX source editor"
-          onFocusCapture={() => setActivePane('editor')}
-          onPointerDown={() => setActivePane('editor')}
-          onPointerEnter={() => setActivePane('editor')}
         >
+          {scrollOwner !== 'editor' ? (
+            <SyncGateOverlay onActivate={() => setScrollOwner('editor')} />
+          ) : null}
           <div className="pane-header editor-header">
             <div className="pane-title">
               <div className="file-actions" aria-label="File actions">
@@ -354,15 +335,17 @@ function App() {
         <section
           className="pane preview-pane"
           aria-label="PDF preview"
-          onPointerDown={() => setActivePane('preview')}
-          onPointerEnter={() => setActivePane('preview')}
         >
+          {scrollOwner !== 'preview' ? (
+            <SyncGateOverlay onActivate={() => setScrollOwner('preview')} />
+          ) : null}
           <PdfPreview
             data={pdfData}
             getCurrentSourceLine={getCurrentEditorSourceLine}
             handleRef={pdfPreviewRef}
             onSourceLineRequest={handlePdfSourceLineRequest}
-            reverseSyncEnabled={activePane === 'preview'}
+            reverseSyncEnabled={scrollOwner === 'preview'}
+            sourceSyncEnabled={scrollOwner === 'editor'}
             syncIndex={syncIndex}
           />
         </section>
@@ -381,6 +364,16 @@ function App() {
         {showLog ? <pre>{log}</pre> : null}
       </footer>
     </div>
+  );
+}
+
+function SyncGateOverlay({ onActivate }: { onActivate: () => void }) {
+  return (
+    <div
+      aria-hidden="true"
+      className="sync-gate-overlay"
+      onPointerEnter={onActivate}
+    />
   );
 }
 

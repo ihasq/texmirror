@@ -12,11 +12,18 @@ interface PdfPreviewProps {
   handleRef?: HandleRef<PdfPreviewHandle>;
   onSourceLineRequest?: (line: number) => void;
   reverseSyncEnabled: boolean;
+  sourceSyncEnabled: boolean;
   syncIndex: SyncTexIndex | null;
 }
 
 export interface PdfPreviewHandle {
-  scrollToSourceLine: (line: number) => void;
+  preserveScrollForNextDocument: () => void;
+  scrollToSourceLine: (line: number, options?: { force?: boolean }) => void;
+}
+
+interface PdfScrollSnapshot {
+  left: number;
+  top: number;
 }
 
 interface PdfPageView {
@@ -34,12 +41,14 @@ interface PdfPageView {
 
 interface PdfViewerApplication {
   eventBus?: {
-    on: (eventName: string, listener: (event: PdfViewAreaEvent) => void) => void;
-    off: (eventName: string, listener: (event: PdfViewAreaEvent) => void) => void;
+    on: (eventName: string, listener: PdfEventListener, options?: unknown) => void;
+    off: (eventName: string, listener: PdfEventListener) => void;
   };
   initializedPromise?: Promise<void>;
+  open?: (args: { data: Uint8Array; filename?: string }) => Promise<void>;
   pdfViewer?: {
     container?: HTMLElement;
+    currentPageNumber?: number;
     pagesCount: number;
     getPageView: (index: number) => PdfPageView | undefined;
   };
@@ -54,7 +63,10 @@ interface PdfViewAreaEvent {
     top?: number;
     left?: number;
   };
+  pageNumber?: number;
 }
+
+type PdfEventListener = (event?: PdfViewAreaEvent) => void;
 
 interface PdfViewerWindow extends Window {
   PDFViewerApplication?: PdfViewerApplication;
@@ -68,12 +80,16 @@ interface HandleRef<T> {
   current: T | null;
 }
 
+const VIEWER_SRC = '/pdfjs/web/viewer.html#zoom=page-width&pagemode=none';
+const PDF_FILENAME = 'main.pdf';
+
 export function PdfPreview({
   data,
   getCurrentSourceLine,
   handleRef,
   onSourceLineRequest,
   reverseSyncEnabled,
+  sourceSyncEnabled,
   syncIndex
 }: PdfPreviewProps) {
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
@@ -84,12 +100,17 @@ export function PdfPreview({
   const lastTargetKeyRef = useRef('');
   const onSourceLineRequestRef = useRef(onSourceLineRequest);
   const reverseSyncEnabledRef = useRef(reverseSyncEnabled);
+  const sourceSyncEnabledRef = useRef(sourceSyncEnabled);
+  const preservedScrollSnapshotRef = useRef<PdfScrollSnapshot | null>(null);
+  const sourceSyncSuppressedRef = useRef(false);
   const syncIndexRef = useRef<SyncTexIndex | null>(syncIndex);
+  const viewerGenerationRef = useRef(0);
   const waitPromiseRef = useRef<Promise<PdfViewerApplication | null> | null>(null);
 
   getCurrentSourceLineRef.current = getCurrentSourceLine;
   onSourceLineRequestRef.current = onSourceLineRequest;
   reverseSyncEnabledRef.current = reverseSyncEnabled;
+  sourceSyncEnabledRef.current = sourceSyncEnabled;
   syncIndexRef.current = syncIndex;
 
   useEffect(() => {
@@ -105,6 +126,10 @@ export function PdfPreview({
   }, [reverseSyncEnabled]);
 
   useEffect(() => {
+    sourceSyncEnabledRef.current = sourceSyncEnabled;
+  }, [sourceSyncEnabled]);
+
+  useEffect(() => {
     lastRequestedSourceLineRef.current = 0;
     lastTargetKeyRef.current = '';
   }, [syncIndex]);
@@ -113,7 +138,22 @@ export function PdfPreview({
     if (!handleRef) return;
 
     const handle: PdfPreviewHandle = {
-      scrollToSourceLine(line: number) {
+      preserveScrollForNextDocument() {
+        const app = appRef.current ?? getPdfViewerApplication(frameRef.current);
+        const snapshot = readScrollSnapshot(app, frameRef.current);
+        if (!snapshot) return;
+
+        appRef.current = app;
+        preservedScrollSnapshotRef.current = snapshot;
+        sourceSyncSuppressedRef.current = true;
+      },
+      scrollToSourceLine(line: number, options?: { force?: boolean }) {
+        if (sourceSyncSuppressedRef.current) {
+          if (!options?.force) return;
+          sourceSyncSuppressedRef.current = false;
+          preservedScrollSnapshotRef.current = null;
+        }
+
         const app = appRef.current ?? getPdfViewerApplication(frameRef.current);
         if (app?.pdfViewer?.pagesCount) {
           appRef.current = app;
@@ -147,6 +187,8 @@ export function PdfPreview({
     lastRequestedSourceLineRef.current = 0;
     lastTargetKeyRef.current = '';
     waitPromiseRef.current = null;
+    preservedScrollSnapshotRef.current = null;
+    sourceSyncSuppressedRef.current = false;
   }, [viewerUrl]);
 
   useEffect(() => {
@@ -155,15 +197,76 @@ export function PdfPreview({
       return;
     }
 
+    setViewerUrl((current) => current ?? VIEWER_SRC);
+  }, [data]);
+
+  useEffect(() => {
+    if (!data || !viewerUrl) return;
+
+    const generation = viewerGenerationRef.current + 1;
+    viewerGenerationRef.current = generation;
+    let disposed = false;
+    const timers: number[] = [];
+    const restoreListeners: Array<() => void> = [];
     const pdfBuffer = new ArrayBuffer(data.byteLength);
     new Uint8Array(pdfBuffer).set(data);
-    const url = URL.createObjectURL(new Blob([pdfBuffer], { type: 'application/pdf' }));
-    setViewerUrl(`/pdfjs/web/viewer.html?file=${encodeURIComponent(url)}#zoom=page-width&pagemode=none`);
+    const snapshot = preservedScrollSnapshotRef.current ?? readScrollSnapshot(appRef.current, frameRef.current);
+    preservedScrollSnapshotRef.current = null;
+
+    if (snapshot) {
+      sourceSyncSuppressedRef.current = true;
+    }
+
+    void waitForPdfViewer(frameRef.current, { requirePages: false }).then(async (app) => {
+      if (disposed || generation !== viewerGenerationRef.current || !app?.open) return;
+
+      appRef.current = app;
+
+      try {
+        await app.open({ data: new Uint8Array(pdfBuffer), filename: PDF_FILENAME });
+      } catch (error) {
+        if (!disposed) {
+          console.error('[TeXMirror] Failed to load PDF in PDF.js viewer:', error);
+        }
+        return;
+      }
+
+      if (disposed || generation !== viewerGenerationRef.current) return;
+
+      closeDocumentOutline(app);
+      scheduleDocumentOutlineClose(app, timers, restoreListeners);
+
+      if (snapshot) {
+        const restore = () => {
+          if (!disposed && generation === viewerGenerationRef.current) {
+            restoreScrollSnapshot(app, frameRef.current, snapshot, lastTargetKeyRef);
+          }
+        };
+
+        restore();
+        window.requestAnimationFrame(restore);
+        if (app.eventBus) {
+          for (const eventName of ['pagesinit', 'pagesloaded', 'pagerendered']) {
+            app.eventBus.on(eventName, restore);
+            restoreListeners.push(() => app.eventBus?.off(eventName, restore));
+          }
+        }
+        timers.push(window.setTimeout(restore, 120));
+        timers.push(window.setTimeout(restore, 320));
+        timers.push(window.setTimeout(restore, 700));
+        timers.push(window.setTimeout(restore, 1200));
+        timers.push(window.setTimeout(restore, 2200));
+      } else {
+        sourceSyncSuppressedRef.current = false;
+      }
+    });
 
     return () => {
-      URL.revokeObjectURL(url);
+      disposed = true;
+      for (const timer of timers) window.clearTimeout(timer);
+      for (const removeListener of restoreListeners) removeListener();
     };
-  }, [data]);
+  }, [data, viewerUrl]);
 
   useEffect(() => {
     if (!viewerUrl || !syncIndex) return;
@@ -178,7 +281,14 @@ export function PdfPreview({
       closeDocumentOutline(app);
 
       const scrollToCurrentSourceLine = () => {
-        if (disposed || reverseSyncEnabledRef.current) return;
+        if (
+          disposed ||
+          !sourceSyncEnabledRef.current ||
+          reverseSyncEnabledRef.current ||
+          sourceSyncSuppressedRef.current
+        ) {
+          return;
+        }
         scrollToSourceLineNow(
           getCurrentSourceLineRef.current?.() ?? 1,
           app,
@@ -192,11 +302,28 @@ export function PdfPreview({
       timers.push(window.setTimeout(scrollToCurrentSourceLine, 180));
       timers.push(window.setTimeout(scrollToCurrentSourceLine, 600));
 
-      const handleViewAreaUpdate = (event: PdfViewAreaEvent) => {
+      const handleViewAreaUpdate: PdfEventListener = (event) => {
         if (!reverseSyncEnabledRef.current) return;
 
+        requestSourceLineForPdfLocation(app, event?.location);
+      };
+      const handlePageChanging: PdfEventListener = () => {
+        if (!reverseSyncEnabledRef.current) return;
+
+        const request = () => {
+          if (!disposed && reverseSyncEnabledRef.current) {
+            requestSourceLineForPdfLocation(app, readCurrentPdfLocation(app, frameRef.current));
+          }
+        };
+
+        window.requestAnimationFrame(request);
+        timers.push(window.setTimeout(request, 80));
+      };
+      const requestSourceLineForPdfLocation = (
+        app: PdfViewerApplication,
+        location: PdfViewAreaEvent['location'] | null | undefined
+      ) => {
         const index = syncIndexRef.current;
-        const location = event.location;
         const pageNumber = location?.pageNumber;
         const top = location?.top;
         if (!index || !pageNumber || typeof top !== 'number') return;
@@ -215,7 +342,11 @@ export function PdfPreview({
       };
 
       app.eventBus.on('updateviewarea', handleViewAreaUpdate);
-      cleanup = () => app.eventBus?.off('updateviewarea', handleViewAreaUpdate);
+      app.eventBus.on('pagechanging', handlePageChanging);
+      cleanup = () => {
+        app.eventBus?.off('updateviewarea', handleViewAreaUpdate);
+        app.eventBus?.off('pagechanging', handlePageChanging);
+      };
     });
 
     return () => {
@@ -236,7 +367,6 @@ export function PdfPreview({
       {viewerUrl ? (
         <iframe
           className="pdf-frame"
-          key={viewerUrl}
           ref={frameRef}
           src={viewerUrl}
           title="PDF.js preview"
@@ -308,8 +438,12 @@ function scrollToSyncTexPosition(
   }
 }
 
-async function waitForPdfViewer(frame: HTMLIFrameElement | null): Promise<PdfViewerApplication | null> {
+async function waitForPdfViewer(
+  frame: HTMLIFrameElement | null,
+  options: { requirePages?: boolean } = {}
+): Promise<PdfViewerApplication | null> {
   const deadline = performance.now() + 10000;
+  const requirePages = options.requirePages ?? true;
 
   while (performance.now() < deadline) {
     const app = getPdfViewerApplication(frame);
@@ -319,7 +453,7 @@ async function waitForPdfViewer(frame: HTMLIFrameElement | null): Promise<PdfVie
         await Promise.race([app.initializedPromise.catch(() => undefined), delay(120)]);
       }
 
-      if (app.pdfViewer?.pagesCount) {
+      if (app.pdfViewer && (!requirePages || app.pdfViewer.pagesCount)) {
         closeDocumentOutline(app);
         return app;
       }
@@ -335,8 +469,78 @@ function getPdfViewerApplication(frame: HTMLIFrameElement | null): PdfViewerAppl
   return (frame?.contentWindow as PdfViewerWindow | null)?.PDFViewerApplication ?? null;
 }
 
+function readScrollSnapshot(
+  app: PdfViewerApplication | null,
+  frame: HTMLIFrameElement | null
+): PdfScrollSnapshot | null {
+  const container = app ? getViewerContainer(app, frame) : null;
+  if (!container || !app?.pdfViewer?.pagesCount) return null;
+
+  return {
+    top: container.scrollTop,
+    left: container.scrollLeft
+  };
+}
+
+function readCurrentPdfLocation(
+  app: PdfViewerApplication,
+  frame: HTMLIFrameElement | null
+): PdfViewAreaEvent['location'] | null {
+  const pdfViewer = app.pdfViewer;
+  const container = getViewerContainer(app, frame);
+  const pageNumber = pdfViewer?.currentPageNumber;
+  if (!pdfViewer || !container || !pageNumber) return null;
+
+  const pageView = pdfViewer.getPageView(pageNumber - 1);
+  const pageDiv = pageView?.div;
+  if (!pageDiv) return null;
+
+  const pageOffset = getOffsetWithin(pageDiv, container);
+  const scale = pageView.viewport?.scale || 1;
+  const pageHeight = getPageHeight(pageView);
+  const top = clamp((container.scrollTop - pageOffset.top) / scale, 0, pageHeight);
+  const left = Math.max(0, (container.scrollLeft - pageOffset.left) / scale);
+
+  return { pageNumber, top, left };
+}
+
+function restoreScrollSnapshot(
+  app: PdfViewerApplication,
+  frame: HTMLIFrameElement | null,
+  snapshot: PdfScrollSnapshot,
+  lastTargetKeyRef: MutableRefObject<string>
+): void {
+  const container = getViewerContainer(app, frame);
+  if (!container) return;
+
+  container.scrollTop = clamp(snapshot.top, 0, Math.max(0, container.scrollHeight - container.clientHeight));
+  container.scrollLeft = clamp(snapshot.left, 0, Math.max(0, container.scrollWidth - container.clientWidth));
+  lastTargetKeyRef.current = `preserved:${Math.round(container.scrollTop)}:${Math.round(container.scrollLeft)}`;
+}
+
 function closeDocumentOutline(app: PdfViewerApplication): void {
   app.viewsManager?.switchView(0);
+}
+
+function scheduleDocumentOutlineClose(
+  app: PdfViewerApplication,
+  timers: number[],
+  cleanupListeners: Array<() => void>
+): void {
+  const close = () => closeDocumentOutline(app);
+
+  close();
+
+  if (app.eventBus) {
+    for (const eventName of ['documentloaded', 'pagesinit', 'pagesloaded', 'outlineloaded']) {
+      app.eventBus.on(eventName, close);
+      cleanupListeners.push(() => app.eventBus?.off(eventName, close));
+    }
+  }
+
+  for (const delayMs of [80, 180, 420, 900, 1800]) {
+    timers.push(window.setTimeout(close, delayMs));
+  }
 }
 
 function getScrollTarget(
