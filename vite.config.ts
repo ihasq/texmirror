@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import type { Plugin, ResolvedConfig } from 'vite';
+import tailwindcss from '@tailwindcss/vite';
 import { spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { cp, mkdir, rm, stat } from 'node:fs/promises';
@@ -78,6 +79,7 @@ function busyTeXAssetsPlugin(): Plugin {
 
 export default defineConfig({
   plugins: [
+    tailwindcss(),
     busyTeXAssetsPlugin()
   ],
   optimizeDeps: {

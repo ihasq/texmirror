@@ -19,8 +19,10 @@
     "texlyre-busytex": "^1.2.3"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.2",
     "@types/node": "^26.1.1",
     "playwright-core": "^1.61.1",
+    "tailwindcss": "^4.3.2",
     "typescript": "^7.0.2",
     "vite": "^8.1.3"
   }

@@ -36,6 +36,8 @@ interface HandleRef<T> {
   current: T | null;
 }
 
+const editorHostClassName = 'editor-host min-h-0 w-full';
+
 export function EditorPane({ handleRef, value, onChange, onCompile, onScrollFrame }: EditorPaneProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
@@ -170,5 +172,5 @@ export function EditorPane({ handleRef, value, onChange, onCompile, onScrollFram
     };
   }, [onChange, onCompile, onScrollFrame]);
 
-  return <div className="editor-host" ref={hostRef} />;
+  return <div className={editorHostClassName} ref={hostRef} />;
 }

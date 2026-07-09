@@ -92,6 +92,11 @@ interface HandleRef<T> {
 
 const VIEWER_SRC = '/pdfjs/web/viewer.html#zoom=page-width&pagemode=none';
 const PDF_FILENAME = 'main.pdf';
+const pdfFrameShellClassName = 'pdf-frame-shell relative min-h-0 bg-slate-200';
+const previewEmptyClassName =
+  'preview-empty absolute inset-0 z-[2] grid min-h-full place-items-center content-center gap-2 bg-slate-200 p-6 text-center text-slate-500';
+const previewEmptyTitleClassName = 'text-neutral-800';
+const pdfFrameClassName = 'pdf-frame absolute inset-0 h-full w-full border-0 bg-white';
 
 export function PdfPreview({
   data,
@@ -325,16 +330,16 @@ export function PdfPreview({
   }, [syncIndex, viewerUrl]);
 
   return (
-    <div className="pdf-frame-shell">
+    <div className={pdfFrameShellClassName}>
       {!viewerUrl ? (
-        <div className="preview-empty">
-          <strong>No PDF yet</strong>
+        <div className={previewEmptyClassName}>
+          <strong className={previewEmptyTitleClassName}>No PDF yet</strong>
           <span>Run a successful compile to show the document here.</span>
         </div>
       ) : null}
       {viewerUrl ? (
         <iframe
-          className="pdf-frame"
+          className={pdfFrameClassName}
           ref={frameRef}
           src={viewerUrl}
           title="PDF.js preview"

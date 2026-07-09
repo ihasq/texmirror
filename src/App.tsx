@@ -39,6 +39,44 @@ const TEX_FILE_TYPES: FilePickerAcceptType[] = [
   }
 ];
 
+const appShellClassName =
+  'app-shell grid h-dvh min-h-dvh min-w-80 grid-rows-[minmax(0,1fr)_auto] bg-slate-100 font-sans text-neutral-800 antialiased [color-scheme:light] [font-synthesis:none] [text-rendering:optimizeLegibility]';
+const workspaceClassName =
+  'workspace grid min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(320px,1fr)_minmax(320px,1fr)] min-[981px]:grid-cols-[minmax(0,1fr)_minmax(360px,1fr)] min-[981px]:grid-rows-none';
+const paneClassName =
+  'pane relative grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] bg-white';
+const editorPaneClassName =
+  `${paneClassName} editor-pane border-b border-slate-300 min-[981px]:border-r min-[981px]:border-b-0`;
+const previewPaneClassName =
+  'pane preview-pane relative grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)] bg-slate-200';
+const paneHeaderClassName =
+  'pane-header editor-header flex min-h-[42px] flex-wrap items-center justify-between gap-3 border-b border-slate-300 px-3 py-2 text-[13px] font-semibold text-slate-700';
+const paneTitleClassName = 'pane-title inline-flex min-h-[34px] min-w-0 items-center gap-2.5';
+const fileActionsClassName = 'file-actions inline-flex flex-none items-center gap-1.5';
+const fileNameClassName =
+  'file-name max-w-[120px] overflow-hidden text-ellipsis whitespace-nowrap text-neutral-800 min-[641px]:max-w-[220px]';
+const toolbarClassName =
+  'toolbar editor-toolbar flex w-full flex-1 basis-[520px] flex-wrap items-center justify-start gap-2 min-[981px]:w-auto min-[981px]:justify-end';
+const iconButtonClassName =
+  'tool-button inline-flex min-h-[34px] w-[34px] cursor-pointer items-center justify-center rounded-[7px] border border-slate-300 bg-white text-neutral-800 disabled:cursor-not-allowed disabled:opacity-[0.45]';
+const selectControlClassName =
+  'select-control inline-flex min-h-[34px] w-full items-center justify-between gap-[7px] rounded-[7px] border border-slate-300 bg-white pl-2.5 text-[13px] text-slate-700 min-[641px]:w-auto';
+const selectClassName =
+  'h-8 flex-1 border-0 border-l border-slate-300 bg-white py-0 pr-7 pl-2.5 text-neutral-800 min-[641px]:flex-none';
+const toggleClassName =
+  'toggle inline-flex min-h-[34px] items-center gap-[7px] rounded-[7px] border border-slate-300 bg-white px-2.5 text-[13px] text-slate-700';
+const checkboxClassName = 'accent-teal-700';
+const commandButtonClassName =
+  'command-button inline-flex min-h-[34px] cursor-pointer items-center justify-center gap-[7px] rounded-[7px] border border-teal-700 bg-teal-700 px-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-[0.45]';
+const toolbarIconClassName = 'size-[17px] shrink-0';
+const statusIconClassName = 'size-[15px] shrink-0';
+const logToggleIconClassName = 'size-4 shrink-0';
+const logToggleClassName =
+  'log-toggle flex min-h-9 w-full cursor-pointer items-center gap-2 border-b border-slate-200 bg-white px-3 text-slate-700';
+const logPreClassName =
+  'm-0 overflow-auto bg-neutral-800 px-3 py-2.5 font-mono text-xs leading-6 whitespace-pre-wrap text-slate-100';
+const syncGateOverlayClassName = 'sync-gate-overlay absolute inset-0 z-10 bg-transparent';
+
 function App() {
   const [source, setSource] = useState(() => localStorage.getItem(STORAGE_KEY) ?? DEFAULT_TEX);
   const [engine, setEngine] = useState<TexEngine>(() =>
@@ -162,12 +200,16 @@ function App() {
   }, [autoCompile, source, engine, rerun, runCompile]);
 
   const status = useMemo(() => {
-    if (queued) return { label: 'Queued', icon: <LoaderCircle className="spin" /> };
-    if (state === 'initializing') return { label: 'Initializing', icon: <LoaderCircle className="spin" /> };
-    if (state === 'compiling') return { label: 'Compiling', icon: <LoaderCircle className="spin" /> };
-    if (state === 'success') return { label: 'Ready', icon: <CheckCircle2 /> };
-    if (state === 'error') return { label: 'Error', icon: <XCircle /> };
-    return { label: 'Idle', icon: <FileText /> };
+    if (queued) return { label: 'Queued', icon: <LoaderCircle className={`${statusIconClassName} animate-spin`} /> };
+    if (state === 'initializing') {
+      return { label: 'Initializing', icon: <LoaderCircle className={`${statusIconClassName} animate-spin`} /> };
+    }
+    if (state === 'compiling') {
+      return { label: 'Compiling', icon: <LoaderCircle className={`${statusIconClassName} animate-spin`} /> };
+    }
+    if (state === 'success') return { label: 'Ready', icon: <CheckCircle2 className={statusIconClassName} /> };
+    if (state === 'error') return { label: 'Error', icon: <XCircle className={statusIconClassName} /> };
+    return { label: 'Idle', icon: <FileText className={statusIconClassName} /> };
   }, [queued, state]);
 
   const isBusy = state === 'initializing' || state === 'compiling';
@@ -251,47 +293,48 @@ function App() {
   }, []);
 
   return (
-    <div className="app-shell">
-      <main className="workspace">
+    <div className={appShellClassName}>
+      <main className={workspaceClassName}>
         <section
-          className="pane editor-pane"
+          className={editorPaneClassName}
           aria-label="LaTeX source editor"
         >
           {scrollOwner !== 'editor' ? (
             <SyncGateOverlay onActivate={() => setScrollOwner('editor')} />
           ) : null}
-          <div className="pane-header editor-header">
-            <div className="pane-title">
-              <div className="file-actions" aria-label="File actions">
+          <div className={paneHeaderClassName}>
+            <div className={paneTitleClassName}>
+              <div className={fileActionsClassName} aria-label="File actions">
                 <button
                   aria-label="Open TeX file"
-                  className="tool-button"
+                  className={iconButtonClassName}
                   disabled={!canUseFileSystem}
                   onClick={openTexFile}
                   title="Open TeX file"
                   type="button"
                 >
-                  <FolderOpen aria-hidden="true" />
+                  <FolderOpen aria-hidden="true" className={toolbarIconClassName} />
                 </button>
                 <button
                   aria-label="Save TeX file"
-                  className="tool-button"
+                  className={iconButtonClassName}
                   disabled={!canUseFileSystem}
                   onClick={saveTexFile}
                   title="Save TeX file"
                   type="button"
                 >
-                  <Save aria-hidden="true" />
+                  <Save aria-hidden="true" className={toolbarIconClassName} />
                 </button>
               </div>
-              {fileName ? <span className="file-name">{fileName}</span> : null}
+              {fileName ? <span className={fileNameClassName}>{fileName}</span> : null}
             </div>
 
-            <div className="toolbar editor-toolbar">
-              <label className="select-control">
+            <div className={toolbarClassName}>
+              <label className={selectControlClassName}>
                 <span>LaTeX</span>
                 <select
                   aria-label="LaTeX engine"
+                  className={selectClassName}
                   onChange={(event) => setEngine((event.currentTarget as HTMLSelectElement).value as TexEngine)}
                   value={engine}
                 >
@@ -301,26 +344,28 @@ function App() {
                 </select>
               </label>
 
-              <label className="toggle">
+              <label className={toggleClassName}>
                 <input
                   checked={autoCompile}
+                  className={checkboxClassName}
                   onChange={(event) => setAutoCompile((event.currentTarget as HTMLInputElement).checked)}
                   type="checkbox"
                 />
                 <span>Live</span>
               </label>
 
-              <label className="toggle">
+              <label className={toggleClassName}>
                 <input
                   checked={rerun}
+                  className={checkboxClassName}
                   onChange={(event) => setRerun((event.currentTarget as HTMLInputElement).checked)}
                   type="checkbox"
                 />
                 <span>Rerun</span>
               </label>
 
-              <button className="command-button" disabled={isBusy} onClick={runCompile} type="button">
-                <Play aria-hidden="true" />
+              <button className={commandButtonClassName} disabled={isBusy} onClick={runCompile} type="button">
+                <Play aria-hidden="true" className={toolbarIconClassName} />
                 <span>Compile</span>
               </button>
             </div>
@@ -335,7 +380,7 @@ function App() {
         </section>
 
         <section
-          className="pane preview-pane"
+          className={previewPaneClassName}
           aria-label="PDF preview"
         >
           {scrollOwner !== 'preview' ? (
@@ -350,17 +395,17 @@ function App() {
         </section>
       </main>
 
-      <footer className={`log-panel ${showLog ? 'open' : 'closed'}`}>
-        <button className="log-toggle" onClick={() => setShowLog((current) => !current)} type="button">
-          <TerminalSquare aria-hidden="true" />
+      <footer className={getLogPanelClassName(showLog)}>
+        <button className={logToggleClassName} onClick={() => setShowLog((current) => !current)} type="button">
+          <TerminalSquare aria-hidden="true" className={logToggleIconClassName} />
           <span>Log</span>
-          <span className={`status-pill ${state}`}>
+          <span className={getStatusPillClassName(state, true)}>
             {status.icon}
             {status.label}
           </span>
-          {assetProgress !== null ? <span className="log-progress">{Math.round(assetProgress)}%</span> : null}
+          {assetProgress !== null ? <span className="log-progress ml-auto">{Math.round(assetProgress)}%</span> : null}
         </button>
-        {showLog ? <pre>{log}</pre> : null}
+        {showLog ? <pre className={logPreClassName}>{log}</pre> : null}
       </footer>
     </div>
   );
@@ -370,10 +415,31 @@ function SyncGateOverlay({ onActivate }: { onActivate: () => void }) {
   return (
     <div
       aria-hidden="true"
-      className="sync-gate-overlay"
+      className={syncGateOverlayClassName}
       onPointerEnter={onActivate}
     />
   );
+}
+
+function getStatusPillClassName(state: CompileState, compact = false): string {
+  const sizing = compact
+    ? 'min-h-[26px] min-w-24 px-[9px] py-1'
+    : 'min-w-[92px] px-[9px] py-[5px] min-[641px]:min-w-[110px]';
+  const color =
+    state === 'success'
+      ? 'bg-emerald-100 text-emerald-700'
+      : state === 'error'
+        ? 'bg-red-100 text-red-700'
+        : state === 'initializing' || state === 'compiling'
+          ? 'bg-amber-100 text-amber-800'
+          : 'bg-slate-200 text-slate-700';
+
+  return `status-pill ${state} inline-flex items-center justify-center gap-1.5 rounded-full ${sizing} ${color}`;
+}
+
+function getLogPanelClassName(showLog: boolean): string {
+  const state = showLog ? 'open grid grid-rows-[auto_minmax(72px,150px)]' : 'closed';
+  return `log-panel ${state} border-t border-slate-300 bg-white`;
 }
 
 function formatCompileLog(log: string, exitCode: number, elapsedSeconds: string): string {
