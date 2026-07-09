@@ -13,7 +13,6 @@
     "download:busytex": "texlyre-busytex download-assets .cache/busytex/raw-root && node scripts/patch-busytex-assets.mjs .cache/busytex/raw-root/busytex"
   },
   "dependencies": {
-    "idb-keyval": "^6.3.0",
     "lucide-preact": "^1.23.0",
     "monaco-editor": "^0.53.0",
     "preact": "^10.29.7",

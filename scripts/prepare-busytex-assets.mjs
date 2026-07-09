@@ -14,7 +14,7 @@ const RAW_BUSYTEXT_DIR = path.join(RAW_ROOT, 'busytex');
 const LEGACY_PUBLIC_BUSYTEXT_DIR = path.join(ROOT, 'public', 'core', 'busytex');
 const PUBLIC_BUSYTEXT_DIR = LEGACY_PUBLIC_BUSYTEXT_DIR;
 const CHUNK_SIZE = 20 * 1024 * 1024;
-const DEPLOY_ASSET_VERSION = 2;
+const DEPLOY_ASSET_VERSION = 4;
 
 const requiredRawFiles = [
   'busytex.js',
@@ -86,7 +86,6 @@ async function writeDeployAssets() {
   await copyPath(path.join(RAW_BUSYTEXT_DIR, 'busytex.js'), path.join(tempDir, 'busytex.js'));
   await copyPath(path.join(RAW_BUSYTEXT_DIR, 'busytex_pipeline.js'), path.join(tempDir, 'busytex_pipeline.js'));
   await copyPath(path.join(RAW_BUSYTEXT_DIR, 'texlive-extra.js'), path.join(tempDir, 'texlive-extra.js'));
-  await copyPath(path.join(ROOT, 'node_modules', 'idb-keyval', 'dist', 'umd.js'), path.join(tempDir, 'idb-keyval.js'));
   await fs.writeFile(path.join(tempDir, 'busytex_chunked_assets.js'), CHUNKED_ASSETS_HELPER);
   await fs.writeFile(path.join(tempDir, 'busytex_worker.js'), WORKER_SHIM);
 
@@ -262,14 +261,35 @@ async function run(command, args) {
 
 const CHUNKED_ASSETS_HELPER = `(() => {
   const nativeFetch = self.fetch.bind(self);
-  const chunkStore = idbKeyval.createStore('texmirror-busytex-assets-v1', 'chunks');
-  const CACHE_KEY_PREFIX = 'busytex-gzip-chunk:';
+  const CACHE_ROOT_NAME = 'texmirror-busytex-opfs-v1';
+  const CACHE_ROOT_PREFIX = 'texmirror-busytex-';
   const MAX_PARALLEL_CHUNK_LOADS = 6;
+  const inFlightChunkWrites = new Map();
   let manifestPromise = null;
   let prunePromise = null;
+  let originRootPromise = null;
+  let cacheRootPromise = null;
 
   function getManifestUrl() {
     return new URL('busytex-assets.json', self.location.href).href;
+  }
+
+  async function getOriginRoot() {
+    if (!navigator.storage || typeof navigator.storage.getDirectory !== 'function') {
+      throw new Error('This browser does not support OPFS, which is required for chunked BusyTeX caching.');
+    }
+
+    originRootPromise ||= navigator.storage.getDirectory();
+    return originRootPromise;
+  }
+
+  async function getCacheRoot() {
+    if (!cacheRootPromise) {
+      cacheRootPromise = getOriginRoot().then(root =>
+        root.getDirectoryHandle(CACHE_ROOT_NAME, { create: true })
+      );
+    }
+    return cacheRootPromise;
   }
 
   async function getManifest() {
@@ -280,8 +300,8 @@ const CHUNKED_ASSETS_HELPER = `(() => {
         }
         return response.json();
       }).then(manifest => {
-        prunePromise = pruneStaleChunks(manifest).catch(error => {
-          console.warn('[BusyTeX] Failed to prune stale IndexedDB chunks:', error);
+        prunePromise = deleteLegacyIndexedDB().then(() => pruneStaleChunks(manifest)).catch(error => {
+          console.warn('[BusyTeX] Failed to prune stale OPFS chunks:', error);
         });
         return manifest;
       });
@@ -294,65 +314,224 @@ const CHUNKED_ASSETS_HELPER = `(() => {
     return url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
   }
 
-  function chunkCacheKey(assetName, asset, chunk) {
-    return [
-      CACHE_KEY_PREFIX,
+  function deleteLegacyIndexedDB() {
+    if (typeof indexedDB === 'undefined') return Promise.resolve();
+
+    return new Promise(resolve => {
+      const request = indexedDB.deleteDatabase('texmirror-busytex-assets-v1');
+      request.onsuccess = () => resolve();
+      request.onerror = () => resolve();
+      request.onblocked = () => resolve();
+    });
+  }
+
+  function safeName(value) {
+    return String(value).replace(/[^A-Za-z0-9._-]+/g, '_');
+  }
+
+  function assetDirectoryName(assetName, asset) {
+    return safeName([
       assetName,
       asset.sourceSize,
       asset.sourceMtimeMs,
-      asset.compressedSize,
-      chunk.path,
-      chunk.compressedSize
-    ].join(':');
+      asset.compressedSize
+    ].join('__'));
   }
 
-  function currentChunkKeys(manifest) {
-    const keys = new Set();
+  function chunkFileName(chunk) {
+    return safeName(chunk.path);
+  }
+
+  function currentAssetDirectories(manifest) {
+    const directories = new Set();
     for (const [assetName, asset] of Object.entries(manifest.assets || {})) {
-      for (const chunk of asset.chunks || []) {
-        keys.add(chunkCacheKey(assetName, asset, chunk));
-      }
+      directories.add(assetDirectoryName(assetName, asset));
     }
-    return keys;
+    return directories;
+  }
+
+  async function getOptionalDirectory(parent, name) {
+    try {
+      return await parent.getDirectoryHandle(name);
+    } catch (error) {
+      if (error && error.name === 'NotFoundError') return null;
+      throw error;
+    }
+  }
+
+  async function getOptionalFile(parent, name) {
+    try {
+      return await parent.getFileHandle(name);
+    } catch (error) {
+      if (error && error.name === 'NotFoundError') return null;
+      throw error;
+    }
+  }
+
+  async function getAssetDirectory(assetName, asset) {
+    const cacheRoot = await getCacheRoot();
+    return cacheRoot.getDirectoryHandle(assetDirectoryName(assetName, asset), { create: true });
   }
 
   async function pruneStaleChunks(manifest) {
-    const validKeys = currentChunkKeys(manifest);
-    const keys = await idbKeyval.keys(chunkStore);
-    const staleKeys = keys.filter(key =>
-      typeof key === 'string' &&
-      key.startsWith(CACHE_KEY_PREFIX) &&
-      !validKeys.has(key)
-    );
+    const originRoot = await getOriginRoot();
+    for await (const [name, handle] of originRoot.entries()) {
+      if (handle.kind === 'directory' && name.startsWith(CACHE_ROOT_PREFIX) && name !== CACHE_ROOT_NAME) {
+        await originRoot.removeEntry(name, { recursive: true });
+      }
+    }
 
-    if (staleKeys.length > 0) {
-      await idbKeyval.delMany(staleKeys, chunkStore);
+    const cacheRoot = await getCacheRoot();
+    const validDirectories = currentAssetDirectories(manifest);
+    for await (const [name, handle] of cacheRoot.entries()) {
+      if (handle.kind !== 'directory' || !validDirectories.has(name)) {
+        await cacheRoot.removeEntry(name, { recursive: true });
+      }
+    }
+
+    for (const [assetName, asset] of Object.entries(manifest.assets || {})) {
+      const directoryName = assetDirectoryName(assetName, asset);
+      const assetDirectory = await getOptionalDirectory(cacheRoot, directoryName);
+      if (!assetDirectory) continue;
+
+      const validFiles = new Set((asset.chunks || []).map(chunkFileName));
+      for await (const [name, handle] of assetDirectory.entries()) {
+        if (handle.kind !== 'file' || !validFiles.has(name)) {
+          await assetDirectory.removeEntry(name, { recursive: true });
+        }
+      }
     }
   }
 
-  async function readCompressedChunk(assetName, asset, chunk, manifestUrl) {
-    const key = chunkCacheKey(assetName, asset, chunk);
-    const cached = await idbKeyval.get(key, chunkStore);
-    if (cached instanceof ArrayBuffer && cached.byteLength === chunk.compressedSize) {
-      return cached;
+  async function writeResponseToOPFS(response, fileHandle, chunk) {
+    if (!response.body) {
+      throw new Error('Streaming response bodies are required for BusyTeX chunk caching.');
     }
 
+    const writable = await fileHandle.createWritable();
+    const reader = response.body.getReader();
+    let bytesWritten = 0;
+    let closed = false;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytesWritten += value.byteLength;
+        await writable.write(value);
+      }
+
+      if (bytesWritten !== chunk.compressedSize) {
+        throw new Error(
+          'BusyTeX chunk size mismatch for ' + chunk.path +
+          ': expected ' + chunk.compressedSize + ', got ' + bytesWritten
+        );
+      }
+
+      await writable.close();
+      closed = true;
+    } finally {
+      reader.releaseLock();
+      if (!closed && typeof writable.abort === 'function') {
+        try {
+          await writable.abort();
+        } catch {
+          // The next successful write truncates and replaces this cache file.
+        }
+      }
+    }
+  }
+
+  async function readCachedChunkFile(assetDirectory, chunk) {
+    const fileHandle = await getOptionalFile(assetDirectory, chunkFileName(chunk));
+    if (!fileHandle) return null;
+
+    const file = await fileHandle.getFile();
+    return file.size === chunk.compressedSize ? file : null;
+  }
+
+  async function fetchChunkToOPFS(assetName, asset, chunk, manifestUrl) {
+    const assetDirectory = await getAssetDirectory(assetName, asset);
+    const cached = await readCachedChunkFile(assetDirectory, chunk);
+    if (cached) return cached;
+
+    const fileName = chunkFileName(chunk);
+    const cacheKey = assetDirectoryName(assetName, asset) + '/' + fileName;
+    const inFlight = inFlightChunkWrites.get(cacheKey);
+    if (inFlight) return inFlight;
+
+    const chunkPromise = (async () => {
+      const fileHandle = await assetDirectory.getFileHandle(fileName, { create: true });
+      const cachedAgain = await readCachedChunkFile(assetDirectory, chunk);
+      if (cachedAgain) return cachedAgain;
+
+      const chunkUrl = new URL(chunk.path, manifestUrl).href;
+      const response = await nativeFetch(chunkUrl, { cache: 'force-cache' });
+      if (!response.ok) {
+        throw new Error('Failed to load BusyTeX chunk ' + chunk.path + ': HTTP ' + response.status);
+      }
+
+      await writeResponseToOPFS(response, fileHandle, chunk);
+      const file = await fileHandle.getFile();
+      if (file.size !== chunk.compressedSize) {
+        throw new Error(
+          'BusyTeX cached chunk size mismatch for ' + chunk.path +
+          ': expected ' + chunk.compressedSize + ', got ' + file.size
+        );
+      }
+      return file;
+    })();
+
+    inFlightChunkWrites.set(cacheKey, chunkPromise);
+    try {
+      return await chunkPromise;
+    } finally {
+      inFlightChunkWrites.delete(cacheKey);
+    }
+  }
+
+  async function streamFileToController(file, controller) {
+    const reader = file.stream().getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        controller.enqueue(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  async function streamNetworkChunkToController(chunk, manifestUrl, controller) {
     const chunkUrl = new URL(chunk.path, manifestUrl).href;
     const response = await nativeFetch(chunkUrl, { cache: 'force-cache' });
     if (!response.ok) {
       throw new Error('Failed to load BusyTeX chunk ' + chunk.path + ': HTTP ' + response.status);
     }
-
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength !== chunk.compressedSize) {
-      throw new Error(
-        'BusyTeX chunk size mismatch for ' + chunk.path +
-        ': expected ' + chunk.compressedSize + ', got ' + buffer.byteLength
-      );
+    if (!response.body) {
+      throw new Error('Streaming response bodies are required for BusyTeX chunk loading.');
     }
 
-    await idbKeyval.set(key, buffer, chunkStore);
-    return buffer;
+    const reader = response.body.getReader();
+    let bytesRead = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytesRead += value.byteLength;
+        controller.enqueue(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    if (bytesRead !== chunk.compressedSize) {
+      throw new Error(
+        'BusyTeX chunk size mismatch for ' + chunk.path +
+        ': expected ' + chunk.compressedSize + ', got ' + bytesRead
+      );
+    }
   }
 
   function limitParallel(maxConcurrency) {
@@ -383,7 +562,7 @@ const CHUNKED_ASSETS_HELPER = `(() => {
   function preloadCompressedChunks(assetName, asset, manifestUrl) {
     const limit = limitParallel(MAX_PARALLEL_CHUNK_LOADS);
     const chunkPromises = asset.chunks.map(chunk =>
-      limit(() => readCompressedChunk(assetName, asset, chunk, manifestUrl))
+      limit(() => fetchChunkToOPFS(assetName, asset, chunk, manifestUrl))
     );
 
     Promise.all(chunkPromises).catch(() => {
@@ -399,8 +578,13 @@ const CHUNKED_ASSETS_HELPER = `(() => {
         try {
           await prunePromise;
           const chunkPromises = preloadCompressedChunks(assetName, asset, manifestUrl);
-          for (const chunkPromise of chunkPromises) {
-            controller.enqueue(new Uint8Array(await chunkPromise));
+          for (let index = 0; index < asset.chunks.length; index += 1) {
+            const file = await chunkPromises[index];
+            if (file) {
+              await streamFileToController(file, controller);
+            } else {
+              await streamNetworkChunkToController(asset.chunks[index], manifestUrl, controller);
+            }
           }
           controller.close();
         } catch (error) {
@@ -437,8 +621,7 @@ const CHUNKED_ASSETS_HELPER = `(() => {
   };
 })();\n`;
 
-const WORKER_SHIM = `importScripts('idb-keyval.js');
-importScripts('busytex_chunked_assets.js');
+const WORKER_SHIM = `importScripts('busytex_chunked_assets.js');
 importScripts('busytex_pipeline.js');
 
 self.pipeline = null;
