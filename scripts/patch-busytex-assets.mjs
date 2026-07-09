@@ -1,7 +1,10 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { access, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-const pipelinePath = resolve('public/core/busytex/busytex_pipeline.js');
+const busytexDir = resolve(process.argv[2] ?? 'public/core/busytex');
+const pipelinePath = resolve(busytexDir, 'busytex_pipeline.js');
+
+await access(pipelinePath);
 
 let source = await readFile(pipelinePath, 'utf8');
 

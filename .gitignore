@@ -1,7 +1,7 @@
 node_modules/
 dist/
+.cache/
 tsconfig.tsbuildinfo
 .DS_Store
 *.local
 public/core/busytex/
-public/core/busytex-assets.tar.gz

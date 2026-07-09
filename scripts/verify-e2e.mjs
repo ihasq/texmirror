@@ -42,6 +42,7 @@ try {
           !hasMainTexLabel
       );
     },
+    undefined,
     { timeout: 240000 }
   );
 
@@ -58,6 +59,7 @@ try {
           canvas.height > 0
       );
     },
+    undefined,
     { timeout: 240000 }
   );
 
