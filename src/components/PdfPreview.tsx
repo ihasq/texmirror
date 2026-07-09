@@ -19,8 +19,14 @@ export interface PdfScrollSyncSample {
   sourceLine: number;
 }
 
+export interface PdfScrollState {
+  scrollRange: number;
+  scrollTop: number;
+}
+
 export interface PdfPreviewHandle {
   preserveScrollForNextDocument: () => void;
+  readScrollState: () => PdfScrollState | null;
   resolveSourceLineTarget: (line: number) => PdfSourceTarget | null;
   scrollToDisplacement: (displacement: number) => void;
   scrollToScrollTop: (top: number) => void;
@@ -142,6 +148,17 @@ export function PdfPreview({
         appRef.current = app;
         preservedScrollSnapshotRef.current = snapshot;
         sourceSyncSuppressedRef.current = true;
+      },
+      readScrollState() {
+        const app = appRef.current ?? getPdfViewerApplication(frameRef.current);
+        const container = app ? getViewerContainer(app, frameRef.current) : null;
+        if (!container || !app?.pdfViewer?.pagesCount) return null;
+
+        appRef.current = app;
+        return {
+          scrollRange: getScrollRange(container),
+          scrollTop: container.scrollTop
+        };
       },
       resolveSourceLineTarget(line: number) {
         if (sourceSyncSuppressedRef.current) {

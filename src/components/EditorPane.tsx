@@ -29,7 +29,13 @@ export interface EditorScrollSample {
   scrollTop: number;
 }
 
+export interface EditorScrollState {
+  scrollRange: number;
+  scrollTop: number;
+}
+
 export interface EditorPaneHandle {
+  readScrollState: () => EditorScrollState | null;
   revealSourceLine: (line: number, options?: { force?: boolean }) => void;
   resolveSourceLineScrollTop: (line: number) => number | null;
   scrollToDisplacement: (displacement: number) => void;
@@ -52,6 +58,15 @@ export function EditorPane({ handleRef, value, onChange, onCompile, onScrollFram
     if (!handleRef) return;
 
     const handle: EditorPaneHandle = {
+      readScrollState() {
+        const editor = editorRef.current;
+        if (!editor) return null;
+
+        return {
+          scrollRange: getEditorScrollRange(editor),
+          scrollTop: editor.getScrollTop()
+        };
+      },
       revealSourceLine(line: number, options?: { force?: boolean }) {
         const editor = editorRef.current;
         if (!editor || line < 1) return;

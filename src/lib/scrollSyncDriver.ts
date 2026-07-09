@@ -12,6 +12,11 @@ export interface PreviewScrollDriverSample {
   sourceLine: number;
 }
 
+export interface ScrollDriverPositionSample {
+  scrollRange: number;
+  scrollTop: number;
+}
+
 export interface ScrollFollowerTarget {
   top: number;
 }
@@ -54,20 +59,33 @@ interface ScrollDisplacementState {
 
 const SCROLL_TOP_TOLERANCE = 0.5;
 const DISPLACEMENT_TOLERANCE = 0.000001;
+const OWNER_SWITCH_GUARD_MS = 350;
+const START_SNAP_TOLERANCE = 1;
+const START_SNAP_MIN_DISTANCE = 12;
+
+interface OwnerSwitchGuard {
+  owner: ScrollSyncOwner;
+  scrollRange: number;
+  scrollTop: number;
+  startedAt: number;
+}
 
 export class ScrollSyncDriver {
   private owner: ScrollSyncOwner = 'editor';
   private readonly displacement = new UnifiedScrollDisplacement();
+  private ownerSwitchGuard: OwnerSwitchGuard | null = null;
 
   reset(): void {
     this.displacement.reset();
+    this.ownerSwitchGuard = null;
   }
 
-  setOwner(owner: ScrollSyncOwner): void {
+  setOwner(owner: ScrollSyncOwner, seed?: ScrollDriverPositionSample | null): void {
     if (this.owner === owner) return;
 
     this.owner = owner;
-    this.reset();
+    this.displacement.seed(seed);
+    this.ownerSwitchGuard = seed ? createOwnerSwitchGuard(owner, seed) : null;
   }
 
   followEditor<Target extends ScrollFollowerTarget>(
@@ -75,9 +93,11 @@ export class ScrollSyncDriver {
     follower: PreviewFollower<Target>
   ): void {
     if (this.owner !== 'editor') return;
+    if (this.shouldIgnoreOwnerSwitchSample(sample)) return;
 
     const update = this.displacement.update(sample);
     if (!update) return;
+    this.ownerSwitchGuard = null;
 
     const checkpointTop = resolveCheckpointMappedTop(
       sample.scrollTop,
@@ -102,9 +122,11 @@ export class ScrollSyncDriver {
 
   followPreview(sample: PreviewScrollDriverSample, follower: EditorFollower): void {
     if (this.owner !== 'preview') return;
+    if (this.shouldIgnoreOwnerSwitchSample(sample)) return;
 
     const update = this.displacement.update(sample);
     if (!update) return;
+    this.ownerSwitchGuard = null;
 
     const checkpointTop = resolveCheckpointMappedTop(
       sample.scrollTop,
@@ -122,6 +144,26 @@ export class ScrollSyncDriver {
       follower.scrollToSourceLine(sample.sourceLine);
     }
   }
+
+  private shouldIgnoreOwnerSwitchSample(sample: ScrollDriverPositionSample): boolean {
+    const guard = this.ownerSwitchGuard;
+    if (!guard || guard.owner !== this.owner) return false;
+
+    if (now() - guard.startedAt > OWNER_SWITCH_GUARD_MS) {
+      this.ownerSwitchGuard = null;
+      return false;
+    }
+
+    const scrollRange = Math.max(0, sample.scrollRange);
+    const scrollTop = clamp(sample.scrollTop, 0, scrollRange);
+    const rangeCollapsed = guard.scrollRange > START_SNAP_MIN_DISTANCE && scrollRange <= START_SNAP_TOLERANCE;
+    const snappedToStart =
+      guard.scrollTop > START_SNAP_MIN_DISTANCE &&
+      scrollRange > START_SNAP_MIN_DISTANCE &&
+      scrollTop <= START_SNAP_TOLERANCE;
+
+    return rangeCollapsed || snappedToStart;
+  }
 }
 
 class UnifiedScrollDisplacement {
@@ -131,27 +173,50 @@ class UnifiedScrollDisplacement {
     this.state = null;
   }
 
-  update(sample: { scrollRange: number; scrollTop: number }): ScrollDisplacementUpdate | null {
-    const scrollRange = Math.max(0, sample.scrollRange);
-    const scrollTop = clamp(sample.scrollTop, 0, scrollRange);
-    const displacement = scrollRange > 0 ? scrollTop / scrollRange : 0;
+  seed(sample?: ScrollDriverPositionSample | null): void {
+    this.state = sample ? toDisplacementState(sample) : null;
+  }
+
+  update(sample: ScrollDriverPositionSample): ScrollDisplacementUpdate | null {
+    const state = toDisplacementState(sample);
     const previous = this.state;
 
-    this.state = { displacement, scrollRange, scrollTop };
-
+    this.state = state;
     if (!previous) {
-      return { displacement };
+      return { displacement: state.displacement };
     }
 
-    const scrollTopChanged = Math.abs(scrollTop - previous.scrollTop) > SCROLL_TOP_TOLERANCE;
-    const displacementChanged = Math.abs(displacement - previous.displacement) > DISPLACEMENT_TOLERANCE;
-    const rangeChanged = scrollRange !== previous.scrollRange;
+    const scrollTopChanged = Math.abs(state.scrollTop - previous.scrollTop) > SCROLL_TOP_TOLERANCE;
+    const displacementChanged = Math.abs(state.displacement - previous.displacement) > DISPLACEMENT_TOLERANCE;
+    const rangeChanged = state.scrollRange !== previous.scrollRange;
     if (!scrollTopChanged && !displacementChanged && !rangeChanged) {
       return null;
     }
 
-    return { displacement };
+    return { displacement: state.displacement };
   }
+}
+
+function createOwnerSwitchGuard(owner: ScrollSyncOwner, sample: ScrollDriverPositionSample): OwnerSwitchGuard {
+  const state = toDisplacementState(sample);
+  return {
+    owner,
+    scrollRange: state.scrollRange,
+    scrollTop: state.scrollTop,
+    startedAt: now()
+  };
+}
+
+function toDisplacementState(sample: ScrollDriverPositionSample): ScrollDisplacementState {
+  const scrollRange = Math.max(0, sample.scrollRange);
+  const scrollTop = clamp(sample.scrollTop, 0, scrollRange);
+  const displacement = scrollRange > 0 ? scrollTop / scrollRange : 0;
+
+  return { displacement, scrollRange, scrollTop };
+}
+
+function now(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.now();
 }
 
 function clamp(value: number, min: number, max: number): number {

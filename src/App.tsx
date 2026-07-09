@@ -14,6 +14,7 @@ import { PdfPreview, type PdfPreviewHandle, type PdfScrollSyncSample } from './c
 import { DEFAULT_TEX } from './lib/examples';
 import {
   ScrollSyncDriver,
+  type ScrollDriverPositionSample,
   type ScrollSyncCheckpoint,
   type ScrollSyncCheckpointPair
 } from './lib/scrollSyncDriver';
@@ -110,6 +111,7 @@ function App() {
   const pdfPreviewRef = useRef<PdfPreviewHandle | null>(null);
   const scrollSyncDriverRef = useRef(new ScrollSyncDriver());
   const editorScrollSampleRef = useRef<EditorScrollSample>({ centerLine: 1, scrollRange: 0, scrollTop: 0 });
+  const pdfScrollSampleRef = useRef<PdfScrollSyncSample | null>(null);
   const sourceRef = useRef(source);
   const optionsRef = useRef({ engine, rerun });
   const canUseFileSystem = typeof window.showOpenFilePicker === 'function' &&
@@ -284,7 +286,16 @@ function App() {
   }, [fileName]);
 
   const setScrollOwner = useCallback((owner: ScrollOwner) => {
-    scrollSyncDriverRef.current.setOwner(owner);
+    scrollSyncDriverRef.current.setOwner(
+      owner,
+      readScrollOwnerSeed(
+        owner,
+        editorPaneRef.current,
+        pdfPreviewRef.current,
+        editorScrollSampleRef.current,
+        pdfScrollSampleRef.current
+      )
+    );
     setScrollOwnerState((current) => current === owner ? current : owner);
   }, []);
 
@@ -300,6 +311,7 @@ function App() {
   }, [structuralCheckpointLines]);
 
   const handlePdfScrollSyncSample = useCallback((sample: PdfScrollSyncSample) => {
+    pdfScrollSampleRef.current = sample;
     scrollSyncDriverRef.current.followPreview(sample, {
       resolveScrollCheckpoints: (ownerTop, owner) => resolveScrollSyncCheckpoints(ownerTop, owner, structuralCheckpointLines, editorPaneRef.current, pdfPreviewRef.current),
       scrollToDisplacement: (displacement) => editorPaneRef.current?.scrollToDisplacement(displacement),
@@ -456,6 +468,20 @@ function getStatusPillClassName(state: CompileState, compact = false): string {
 function getLogPanelClassName(showLog: boolean): string {
   const state = showLog ? 'open grid grid-rows-[auto_minmax(72px,150px)]' : 'closed';
   return `log-panel ${state} border-t border-slate-300 bg-white`;
+}
+
+function readScrollOwnerSeed(
+  owner: ScrollOwner,
+  editor: EditorPaneHandle | null,
+  preview: PdfPreviewHandle | null,
+  editorFallback: EditorScrollSample,
+  previewFallback: PdfScrollSyncSample | null
+): ScrollDriverPositionSample | null {
+  if (owner === 'editor') {
+    return editor?.readScrollState() ?? editorFallback;
+  }
+
+  return preview?.readScrollState() ?? previewFallback;
 }
 
 function resolveScrollSyncCheckpoints(
